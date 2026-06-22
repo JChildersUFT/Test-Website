@@ -54,8 +54,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // PDF extraction can introduce irregular whitespace (runs of spaces from
+  // justified text, newlines at line-wrap points) that splits up phrases
+  // which are visually contiguous, breaking a plain substring match.
+  const normalizedText = text.replace(/\s+/g, " ").toLowerCase();
   const knownMatches = KNOWN_COMPANIES.filter((company) =>
-    text.toLowerCase().includes(company.toLowerCase())
+    normalizedText.includes(company.replace(/\s+/g, " ").toLowerCase())
   );
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
