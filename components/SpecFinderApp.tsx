@@ -1,12 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import { upload } from "@vercel/blob/client";
 import UploadZone from "./UploadZone";
 import WaveDivider from "./WaveDivider";
 import ResultsSection from "./ResultsSection";
 import type { AiDetected, KnownMatch } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
+
+// Vercel's serverless functions cap request bodies at 4.5MB. Files under
+// that go straight to /api/extract; larger ones upload directly to Blob
+// storage from the browser first, and we send just the resulting URL.
+const DIRECT_UPLOAD_LIMIT = 4.5 * 1024 * 1024;
 
 export default function SpecFinderApp() {
   const [status, setStatus] = useState<Status>("idle");
@@ -20,14 +26,27 @@ export default function SpecFinderApp() {
     setFileName(file.name);
     setErrorMsg(null);
 
-    const formData = new FormData();
-    formData.append("file", file);
-
     try {
-      const res = await fetch("/api/extract", {
-        method: "POST",
-        body: formData,
-      });
+      let res: Response;
+
+      if (file.size < DIRECT_UPLOAD_LIMIT) {
+        const formData = new FormData();
+        formData.append("file", file);
+        res = await fetch("/api/extract", {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        const blob = await upload(file.name, file, {
+          access: "private",
+          handleUploadUrl: "/api/upload-url",
+        });
+        res = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ blobUrl: blob.url }),
+        });
+      }
 
       const data = await res.json();
 

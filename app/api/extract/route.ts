@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import pdfParse from "pdf-parse-fork";
 import Anthropic from "@anthropic-ai/sdk";
+import { del, get } from "@vercel/blob";
 import companiesData from "@/data/companies.json";
 import type { AiDetected, KnownMatch } from "@/lib/types";
 
@@ -26,32 +27,87 @@ interface RawAiCompany {
 }
 
 export async function POST(req: NextRequest) {
-  let formData: FormData;
+  const contentType = req.headers.get("content-type") ?? "";
+
+  let bytes: Uint8Array;
+  let blobUrl: string | null = null;
+
+  if (contentType.includes("application/json")) {
+    let body: { blobUrl?: unknown };
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid upload." }, { status: 400 });
+    }
+
+    if (typeof body.blobUrl !== "string" || !body.blobUrl) {
+      return NextResponse.json(
+        { error: "No blob URL was provided." },
+        { status: 400 }
+      );
+    }
+    blobUrl = body.blobUrl;
+
+    let blobResult: Awaited<ReturnType<typeof get>>;
+    try {
+      blobResult = await get(blobUrl, { access: "private" });
+    } catch (err) {
+      console.error("Blob fetch error:", err);
+      return NextResponse.json(
+        { error: "Could not download the uploaded PDF." },
+        { status: 502 }
+      );
+    }
+    if (!blobResult || blobResult.statusCode !== 200) {
+      return NextResponse.json(
+        { error: "Could not download the uploaded PDF." },
+        { status: 502 }
+      );
+    }
+
+    // Must be a plain Uint8Array, not a Node Buffer: pdf-parse-fork's bundled
+    // pdf.js assumes spec-compliant (copy) slice() semantics, which
+    // Buffer.prototype.slice() does not provide (it returns a view).
+    bytes = new Uint8Array(await new Response(blobResult.stream).arrayBuffer());
+  } else {
+    let formData: FormData;
+    try {
+      formData = await req.formData();
+    } catch {
+      return NextResponse.json({ error: "Invalid upload." }, { status: 400 });
+    }
+
+    const file = formData.get("file");
+    if (!(file instanceof File)) {
+      return NextResponse.json(
+        { error: "No PDF file was provided." },
+        { status: 400 }
+      );
+    }
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      return NextResponse.json(
+        { error: "Please upload a PDF file." },
+        { status: 400 }
+      );
+    }
+
+    bytes = new Uint8Array(await file.arrayBuffer());
+  }
+
   try {
-    formData = await req.formData();
-  } catch {
-    return NextResponse.json({ error: "Invalid upload." }, { status: 400 });
+    return await extractFromBytes(bytes);
+  } finally {
+    if (blobUrl) {
+      try {
+        await del(blobUrl);
+      } catch (err) {
+        console.error("Blob delete error:", err);
+      }
+    }
   }
+}
 
-  const file = formData.get("file");
-  if (!(file instanceof File)) {
-    return NextResponse.json(
-      { error: "No PDF file was provided." },
-      { status: 400 }
-    );
-  }
-  if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
-    return NextResponse.json(
-      { error: "Please upload a PDF file." },
-      { status: 400 }
-    );
-  }
-
-  // Must be a plain Uint8Array, not a Node Buffer: pdf-parse-fork's bundled
-  // pdf.js assumes spec-compliant (copy) slice() semantics, which
-  // Buffer.prototype.slice() does not provide (it returns a view).
-  const bytes = new Uint8Array(await file.arrayBuffer());
-
+async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
   const pages: { page: number; text: string }[] = [];
 
   try {
