@@ -4,14 +4,15 @@ import { useState } from "react";
 import UploadZone from "./UploadZone";
 import WaveDivider from "./WaveDivider";
 import ResultsSection from "./ResultsSection";
+import type { AiDetected, KnownMatch } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
 
 export default function SpecFinderApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
-  const [knownMatches, setKnownMatches] = useState<string[]>([]);
-  const [aiDetected, setAiDetected] = useState<string[]>([]);
+  const [knownMatches, setKnownMatches] = useState<KnownMatch[]>([]);
+  const [aiDetected, setAiDetected] = useState<AiDetected[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const handleFile = async (file: File) => {

@@ -1,11 +1,12 @@
-import CompanyPill from "./CompanyPill";
+import CompanyCard from "./CompanyCard";
+import type { AiDetected, KnownMatch } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
 
 type Props = {
   status: Status;
-  knownMatches: string[];
-  aiDetected: string[];
+  knownMatches: KnownMatch[];
+  aiDetected: AiDetected[];
   errorMsg: string | null;
 };
 
@@ -17,7 +18,7 @@ export default function ResultsSection({
 }: Props) {
   return (
     <section className="w-full bg-surface">
-      <div className="mx-auto max-w-3xl px-6 py-16">
+      <div className="mx-auto max-w-4xl px-6 py-16">
         {status === "idle" && (
           <p className="text-center text-sm text-secondary">
             Upload a spec sheet PDF above to see every company it mentions.
@@ -46,9 +47,15 @@ export default function ResultsSection({
                 Companies from your known-partner list found in this document.
               </p>
               {knownMatches.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {knownMatches.map((name) => (
-                    <CompanyPill key={name} label={name} variant="known" />
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {knownMatches.map((m) => (
+                    <CompanyCard
+                      key={m.company}
+                      company={m.company}
+                      pages={m.pages}
+                      products={m.products}
+                      variant="known"
+                    />
                   ))}
                 </div>
               ) : (
@@ -67,9 +74,15 @@ export default function ResultsSection({
                 known-partner list.
               </p>
               {aiDetected.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {aiDetected.map((name) => (
-                    <CompanyPill key={name} label={name} variant="ai" />
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {aiDetected.map((m) => (
+                    <CompanyCard
+                      key={m.company}
+                      company={m.company}
+                      pages={m.pages}
+                      products={m.products}
+                      variant="ai"
+                    />
                   ))}
                 </div>
               ) : (

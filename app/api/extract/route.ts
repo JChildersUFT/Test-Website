@@ -2,11 +2,28 @@ import { NextRequest, NextResponse } from "next/server";
 import pdfParse from "pdf-parse-fork";
 import Anthropic from "@anthropic-ai/sdk";
 import companiesData from "@/data/companies.json";
+import type { AiDetected, KnownMatch } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 const KNOWN_COMPANIES = companiesData as string[];
 const MAX_TEXT_CHARS = 120_000;
+
+function normalize(text: string) {
+  return text.replace(/\s+/g, " ").toLowerCase().trim();
+}
+
+function namesOverlap(a: string, b: string) {
+  const na = normalize(a);
+  const nb = normalize(b);
+  return na.includes(nb) || nb.includes(na);
+}
+
+interface RawAiCompany {
+  company: string;
+  pages: number[];
+  products: string[];
+}
 
 export async function POST(req: NextRequest) {
   let formData: FormData;
@@ -35,10 +52,31 @@ export async function POST(req: NextRequest) {
   // Buffer.prototype.slice() does not provide (it returns a view).
   const bytes = new Uint8Array(await file.arrayBuffer());
 
-  let text: string;
+  const pages: { page: number; text: string }[] = [];
+
   try {
-    const result = await pdfParse(bytes);
-    text = result.text.trim();
+    await pdfParse(bytes, {
+      pagerender: async (pageData) => {
+        const textContent = await pageData.getTextContent({
+          normalizeWhitespace: false,
+          disableCombineTextItems: false,
+        });
+
+        let lastY: number | undefined;
+        let text = "";
+        for (const item of textContent.items) {
+          if (lastY === undefined || lastY === item.transform[5]) {
+            text += item.str;
+          } else {
+            text += "\n" + item.str;
+          }
+          lastY = item.transform[5];
+        }
+
+        pages.push({ page: pageData.pageNumber, text });
+        return text;
+      },
+    });
   } catch (err) {
     console.error("PDF parse error:", err);
     return NextResponse.json(
@@ -47,7 +85,9 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!text) {
+  pages.sort((a, b) => a.page - b.page);
+
+  if (!pages.some((p) => p.text.trim())) {
     return NextResponse.json(
       { error: "No readable text found in that PDF." },
       { status: 422 }
@@ -57,10 +97,16 @@ export async function POST(req: NextRequest) {
   // PDF extraction can introduce irregular whitespace (runs of spaces from
   // justified text, newlines at line-wrap points) that splits up phrases
   // which are visually contiguous, breaking a plain substring match.
-  const normalizedText = text.replace(/\s+/g, " ").toLowerCase();
-  const knownMatches = KNOWN_COMPANIES.filter((company) =>
-    normalizedText.includes(company.replace(/\s+/g, " ").toLowerCase())
-  );
+  const knownMatches: KnownMatch[] = [];
+  for (const company of KNOWN_COMPANIES) {
+    const needle = normalize(company);
+    const matchedPages = pages
+      .filter((p) => normalize(p.text).includes(needle))
+      .map((p) => p.page);
+    if (matchedPages.length > 0) {
+      knownMatches.push({ company, pages: matchedPages });
+    }
+  }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -72,24 +118,48 @@ export async function POST(req: NextRequest) {
 
   const anthropic = new Anthropic({ apiKey });
 
-  let aiCompanies: string[] = [];
+  const annotatedText = pages
+    .map((p) => `[Page ${p.page}]\n${p.text.replace(/\s+/g, " ").trim()}`)
+    .join("\n\n")
+    .slice(0, MAX_TEXT_CHARS);
+
+  let aiCompanies: RawAiCompany[] = [];
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 2048,
       tools: [
         {
           name: "list_companies",
           description:
-            "Record every distinct company or manufacturer name mentioned in the document text.",
+            "Record every distinct company or manufacturer mentioned in the document, the page numbers it appears on, and the specific products or applications it is being specified for.",
           input_schema: {
             type: "object",
             properties: {
               companies: {
                 type: "array",
-                items: { type: "string" },
-                description:
-                  "Company or manufacturer names mentioned in the text. No product names, model numbers, or generic terms. Deduplicated.",
+                items: {
+                  type: "object",
+                  properties: {
+                    company: {
+                      type: "string",
+                      description: "Company or manufacturer name.",
+                    },
+                    pages: {
+                      type: "array",
+                      items: { type: "integer" },
+                      description:
+                        "Page numbers (matching the [Page N] markers in the text) where this company is mentioned.",
+                    },
+                    products: {
+                      type: "array",
+                      items: { type: "string" },
+                      description:
+                        "Specific products or applications this company's equipment is being specified for in this document (e.g. 'centrifugal self-priming pumps', 'waste activated sludge pumps'). Be specific, not generic.",
+                    },
+                  },
+                  required: ["company", "pages", "products"],
+                },
               },
             },
             required: ["companies"],
@@ -100,10 +170,7 @@ export async function POST(req: NextRequest) {
       messages: [
         {
           role: "user",
-          content: `Read the following equipment spec sheet text and list every company or manufacturer name mentioned in it.\n\n${text.slice(
-            0,
-            MAX_TEXT_CHARS
-          )}`,
+          content: `Read the following equipment spec sheet text, annotated with [Page N] markers showing which page each block of text came from. List every company or manufacturer mentioned, the page numbers each appears on, and the specific products or applications it is being specified for in this document. Be specific about products/applications, not just the company name.\n\n${annotatedText}`,
         },
       ],
     });
@@ -114,9 +181,23 @@ export async function POST(req: NextRequest) {
     if (toolUse && toolUse.type === "tool_use") {
       const input = toolUse.input as { companies?: unknown };
       if (Array.isArray(input.companies)) {
-        aiCompanies = input.companies.filter(
-          (c): c is string => typeof c === "string"
-        );
+        aiCompanies = input.companies
+          .filter(
+            (c): c is Record<string, unknown> =>
+              typeof c === "object" && c !== null
+          )
+          .map((c) => ({
+            company: typeof c.company === "string" ? c.company.trim() : "",
+            pages: Array.isArray(c.pages)
+              ? c.pages.filter((p): p is number => typeof p === "number")
+              : [],
+            products: Array.isArray(c.products)
+              ? c.products.filter(
+                  (p): p is string => typeof p === "string" && p.trim().length > 0
+                )
+              : [],
+          }))
+          .filter((c) => c.company.length > 0);
       }
     }
   } catch (err) {
@@ -127,22 +208,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const isCoveredByKnownList = (name: string) =>
-    KNOWN_COMPANIES.some(
-      (company) =>
-        name.toLowerCase().includes(company.toLowerCase()) ||
-        company.toLowerCase().includes(name.toLowerCase())
-    );
-
   const seen = new Set<string>();
-  const aiDetected: string[] = [];
-  for (const name of aiCompanies) {
-    const trimmed = name.trim();
-    if (!trimmed) continue;
-    const key = trimmed.toLowerCase();
-    if (seen.has(key) || isCoveredByKnownList(trimmed)) continue;
+  const aiDetected: AiDetected[] = [];
+
+  for (const item of aiCompanies) {
+    const key = normalize(item.company);
+    if (seen.has(key)) continue;
     seen.add(key);
-    aiDetected.push(trimmed);
+
+    const knownMatch = knownMatches.find((k) => namesOverlap(k.company, item.company));
+    if (knownMatch) {
+      if (item.products.length > 0) {
+        knownMatch.products = [...new Set([...(knownMatch.products ?? []), ...item.products])];
+      }
+      continue;
+    }
+
+    aiDetected.push({
+      company: item.company,
+      pages: [...new Set(item.pages)].sort((a, b) => a - b),
+      products: item.products,
+    });
   }
 
   return NextResponse.json({ knownMatches, aiDetected });
