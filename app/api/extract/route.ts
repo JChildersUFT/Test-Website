@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PDFParse } from "pdf-parse";
+import pdfParse from "pdf-parse-fork";
 import Anthropic from "@anthropic-ai/sdk";
 import companiesData from "@/data/companies.json";
 
@@ -30,12 +30,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const buffer = Buffer.from(await file.arrayBuffer());
+  // Must be a plain Uint8Array, not a Node Buffer: pdf-parse-fork's bundled
+  // pdf.js assumes spec-compliant (copy) slice() semantics, which
+  // Buffer.prototype.slice() does not provide (it returns a view).
+  const bytes = new Uint8Array(await file.arrayBuffer());
 
   let text: string;
-  const parser = new PDFParse({ data: buffer });
   try {
-    const result = await parser.getText();
+    const result = await pdfParse(bytes);
     text = result.text.trim();
   } catch (err) {
     console.error("PDF parse error:", err);
@@ -43,8 +45,6 @@ export async function POST(req: NextRequest) {
       { error: "Could not read that PDF. It may be corrupted or scanned as an image." },
       { status: 422 }
     );
-  } finally {
-    await parser.destroy();
   }
 
   if (!text) {
