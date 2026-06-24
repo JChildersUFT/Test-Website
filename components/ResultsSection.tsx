@@ -1,10 +1,12 @@
 import CompanyCard from "./CompanyCard";
-import type { AiDetected, KnownMatch } from "@/lib/types";
+import SummaryCard from "./SummaryCard";
+import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
 
 type Props = {
   status: Status;
+  summary: ProjectSummary | null;
   knownMatches: KnownMatch[];
   aiDetected: AiDetected[];
   errorMsg: string | null;
@@ -12,6 +14,7 @@ type Props = {
 
 export default function ResultsSection({
   status,
+  summary,
   knownMatches,
   aiDetected,
   errorMsg,
@@ -39,6 +42,8 @@ export default function ResultsSection({
 
         {status === "done" && (
           <div className="flex flex-col gap-10">
+            {summary && <SummaryCard summary={summary} />}
+
             <div>
               <h2 className="mb-1 text-lg font-semibold text-navy">
                 Known partner matches

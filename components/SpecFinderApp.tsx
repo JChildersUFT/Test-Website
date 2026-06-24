@@ -5,7 +5,7 @@ import { upload } from "@vercel/blob/client";
 import UploadZone from "./UploadZone";
 import WaveDivider from "./WaveDivider";
 import ResultsSection from "./ResultsSection";
-import type { AiDetected, KnownMatch } from "@/lib/types";
+import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
 
@@ -17,6 +17,7 @@ const DIRECT_UPLOAD_LIMIT = 4.5 * 1024 * 1024;
 export default function SpecFinderApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [fileName, setFileName] = useState<string | null>(null);
+  const [summary, setSummary] = useState<ProjectSummary | null>(null);
   const [knownMatches, setKnownMatches] = useState<KnownMatch[]>([]);
   const [aiDetected, setAiDetected] = useState<AiDetected[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -54,6 +55,7 @@ export default function SpecFinderApp() {
         throw new Error(data.error || "Something went wrong. Please try again.");
       }
 
+      setSummary(data.summary ?? null);
       setKnownMatches(data.knownMatches ?? []);
       setAiDetected(data.aiDetected ?? []);
       setStatus("done");
@@ -88,6 +90,7 @@ export default function SpecFinderApp() {
 
       <ResultsSection
         status={status}
+        summary={summary}
         knownMatches={knownMatches}
         aiDetected={aiDetected}
         errorMsg={errorMsg}

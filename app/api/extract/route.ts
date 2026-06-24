@@ -3,20 +3,40 @@ import pdfParse from "pdf-parse-fork";
 import Anthropic from "@anthropic-ai/sdk";
 import { del, get } from "@vercel/blob";
 import companiesData from "@/data/companies.json";
-import type { AiDetected, KnownMatch } from "@/lib/types";
+import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
 
 export const runtime = "nodejs";
 
 const KNOWN_COMPANIES = companiesData as string[];
 const MAX_TEXT_CHARS = 120_000;
+// Acronyms this short (SSI, GEA, VPC, AWC, ...) need a word-boundary match —
+// a plain substring check would also fire inside unrelated longer words.
+const SHORT_NAME_LENGTH = 4;
 
 function normalize(text: string) {
   return text.replace(/\s+/g, " ").toLowerCase().trim();
 }
 
+function escapeRegExp(text: string) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function companyMatchesText(company: string, normalizedText: string) {
+  const needle = normalize(company);
+  if (company.length <= SHORT_NAME_LENGTH) {
+    return new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i").test(normalizedText);
+  }
+  return normalizedText.includes(needle);
+}
+
 function namesOverlap(a: string, b: string) {
   const na = normalize(a);
   const nb = normalize(b);
+  if (a.length <= SHORT_NAME_LENGTH || b.length <= SHORT_NAME_LENGTH) {
+    const containsWhole = (needle: string, haystack: string) =>
+      new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i").test(haystack);
+    return containsWhole(na, nb) || containsWhole(nb, na);
+  }
   return na.includes(nb) || nb.includes(na);
 }
 
@@ -24,6 +44,29 @@ interface RawAiCompany {
   company: string;
   pages: number[];
   products: string[];
+}
+
+const SUMMARY_FIELDS = [
+  "projectName",
+  "projectNumber",
+  "location",
+  "owner",
+  "engineer",
+  "bidDate",
+  "scopeOfWork",
+] as const;
+
+function sanitizeSummaryField(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "Not found";
+}
+
+function sanitizeSummary(value: unknown): ProjectSummary {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const summary = {} as ProjectSummary;
+  for (const field of SUMMARY_FIELDS) {
+    summary[field] = sanitizeSummaryField(raw[field]);
+  }
+  return summary;
 }
 
 export async function POST(req: NextRequest) {
@@ -155,9 +198,8 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
   // which are visually contiguous, breaking a plain substring match.
   const knownMatches: KnownMatch[] = [];
   for (const company of KNOWN_COMPANIES) {
-    const needle = normalize(company);
     const matchedPages = pages
-      .filter((p) => normalize(p.text).includes(needle))
+      .filter((p) => companyMatchesText(company, normalize(p.text)))
       .map((p) => p.page);
     if (matchedPages.length > 0) {
       knownMatches.push({ company, pages: matchedPages });
@@ -180,18 +222,45 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     .slice(0, MAX_TEXT_CHARS);
 
   let aiCompanies: RawAiCompany[] = [];
+  let summary: ProjectSummary = sanitizeSummary(undefined);
   try {
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 2048,
+      max_tokens: 4096,
       tools: [
         {
-          name: "list_companies",
+          name: "extract_spec_sheet_info",
           description:
-            "Record every distinct company or manufacturer mentioned in the document, the page numbers it appears on, and the specific products or applications it is being specified for.",
+            "Record the project summary and every distinct company or manufacturer mentioned in the document, the page numbers each appears on, and the specific products or applications each is being specified for.",
           input_schema: {
             type: "object",
             properties: {
+              summary: {
+                type: "object",
+                description:
+                  "Project-level information, typically found on a cover page, title sheet, or in general/bid information sections. Use the exact string \"Not found\" for any field that is not present in the document.",
+                properties: {
+                  projectName: { type: "string" },
+                  projectNumber: { type: "string" },
+                  location: { type: "string" },
+                  owner: { type: "string" },
+                  engineer: { type: "string" },
+                  bidDate: { type: "string" },
+                  scopeOfWork: {
+                    type: "string",
+                    description: "A brief description of the overall scope of work covered by this document.",
+                  },
+                },
+                required: [
+                  "projectName",
+                  "projectNumber",
+                  "location",
+                  "owner",
+                  "engineer",
+                  "bidDate",
+                  "scopeOfWork",
+                ],
+              },
               companies: {
                 type: "array",
                 items: {
@@ -211,22 +280,28 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
                       type: "array",
                       items: { type: "string" },
                       description:
-                        "Specific products or applications this company's equipment is being specified for in this document (e.g. 'centrifugal self-priming pumps', 'waste activated sludge pumps'). Be specific, not generic.",
+                        "Specific products or applications this company's equipment is being specified for, based on the surrounding spec section (section number, section title, and the paragraph the mention appears in). Include the spec section number and title when visible, e.g. 'Section 46 5103 - Air Diffusers: coarse bubble diffusers for sludge holding tank aeration'. Describe the actual application, not just a generic product category or the company name alone.",
                     },
                   },
                   required: ["company", "pages", "products"],
                 },
               },
             },
-            required: ["companies"],
+            required: ["summary", "companies"],
           },
         },
       ],
-      tool_choice: { type: "tool", name: "list_companies" },
+      tool_choice: { type: "tool", name: "extract_spec_sheet_info" },
       messages: [
         {
           role: "user",
-          content: `Read the following equipment spec sheet text, annotated with [Page N] markers showing which page each block of text came from. List every company or manufacturer mentioned, the page numbers each appears on, and the specific products or applications it is being specified for in this document. Be specific about products/applications, not just the company name.\n\n${annotatedText}`,
+          content: `Read the following equipment spec sheet text, annotated with [Page N] markers showing which page each block of text came from.
+
+1. Extract a project summary: project name, project number, location, owner, engineer, bid date, and scope of work. Look at the cover page, title sheet, or general/bid information sections. Use "Not found" for any field that isn't present in the document.
+
+2. List every company or manufacturer mentioned, the page numbers each appears on, and the specific products or applications it is being specified for. Look at the surrounding spec section (section number, section title, and the paragraph around the mention) to determine what the company's equipment is actually being used for. Include the spec section number and title when visible (e.g. "Section 46 5103 - Air Diffusers"). Be specific about the product/application — e.g. "coarse bubble diffusers for sludge holding tank aeration" rather than just "diffusers" or just the company name.
+
+${annotatedText}`,
         },
       ],
     });
@@ -235,7 +310,8 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
       (block) => block.type === "tool_use"
     );
     if (toolUse && toolUse.type === "tool_use") {
-      const input = toolUse.input as { companies?: unknown };
+      const input = toolUse.input as { summary?: unknown; companies?: unknown };
+      summary = sanitizeSummary(input.summary);
       if (Array.isArray(input.companies)) {
         aiCompanies = input.companies
           .filter(
@@ -287,5 +363,5 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     });
   }
 
-  return NextResponse.json({ knownMatches, aiDetected });
+  return NextResponse.json({ summary, knownMatches, aiDetected });
 }

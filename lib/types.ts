@@ -9,3 +9,13 @@ export interface AiDetected {
   pages: number[];
   products: string[];
 }
+
+export interface ProjectSummary {
+  projectName: string;
+  projectNumber: string;
+  location: string;
+  owner: string;
+  engineer: string;
+  bidDate: string;
+  scopeOfWork: string;
+}
