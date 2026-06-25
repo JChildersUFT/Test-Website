@@ -68,10 +68,17 @@ function namesOverlap(a: string, b: string) {
   return na.includes(nb) || nb.includes(na);
 }
 
-// Division 46 (Water and Wastewater Equipment) section headers look like
-// "SECTION 46 5103" or just show the bare number "46 5103" / "46-5103" in a
-// running header. Catch both forms.
-const DIVISION_46_PATTERNS = [/\bSECTION\s+46\b/i, /\b46[\s-]?\d{4}\b/];
+// Division 46 (Water and Wastewater Equipment) section headers show up in a
+// lot of different forms across spec sheets — a running header with just
+// the bare number, "SECTION 46" with inconsistent spacing, "DIVISION 46",
+// or a section number that starts with 46 or 45. Deliberately loose: it's
+// far cheaper to include an extra page than to silently drop a real one.
+const DIVISION_46_PATTERNS = [
+  /46\s*\d{4}/,
+  /division\s*46/i,
+  /section\s*46/i,
+  /4[65]\s*\d{4}/i,
+];
 
 function isDivision46Page(text: string) {
   return DIVISION_46_PATTERNS.some((pattern) => pattern.test(text));
@@ -254,7 +261,14 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
   // Division 46 pages. Page numbers in both passes refer to the original
   // document throughout — neither pass renumbers anything.
   const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
-  const division46Pages = pages.filter((p) => isDivision46Page(p.text));
+  let division46Pages = pages.filter((p) => isDivision46Page(p.text));
+
+  console.log("Division 46 pages found:", division46Pages.length, "of", pages.length);
+
+  if (division46Pages.length === 0) {
+    console.warn("No Division 46 pages detected — falling back to full document");
+    division46Pages = pages;
+  }
 
   const [summary, aiCompanies] = await Promise.all([
     runSummaryPass(anthropic, frontMatterPages),
