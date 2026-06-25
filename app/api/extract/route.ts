@@ -309,22 +309,41 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const knownMatch = knownMatches.find((k) => namesOverlap(k.company, item.company));
+    const aiPages = [...new Set(item.pages)].sort((a, b) => a - b);
+    const specSection =
+      item.specSection && item.specSection !== "Not found" ? item.specSection : undefined;
+    const products = item.products || undefined;
+
+    // First try to attach to a known partner the verbatim page-scan already
+    // found above.
+    let knownMatch = knownMatches.find((k) => namesOverlap(k.company, item.company));
+
+    // The page-scan only finds names that appear word-for-word in the text. The
+    // AI often returns a canonicalized/expanded name (e.g. "Cornell Pump
+    // Company" when the page says "Cornell", or a name that wrapped a line),
+    // so cross-reference the AI's name against the full known-partner list too.
+    // If it's a known partner, promote it to a known match under the list's
+    // canonical name instead of dropping it into "other companies".
+    if (!knownMatch) {
+      const canonical = KNOWN_COMPANIES.find((c) => namesOverlap(c, item.company));
+      if (canonical) {
+        knownMatch = { company: canonical, pages: aiPages };
+        knownMatches.push(knownMatch);
+      }
+    }
+
     if (knownMatch) {
-      if (item.specSection && item.specSection !== "Not found") {
-        knownMatch.specSection = item.specSection;
-      }
-      if (item.products) {
-        knownMatch.products = item.products;
-      }
+      if (knownMatch.pages.length === 0) knownMatch.pages = aiPages;
+      if (specSection) knownMatch.specSection = specSection;
+      if (products) knownMatch.products = products;
       continue;
     }
 
     aiDetected.push({
       company: item.company,
-      pages: [...new Set(item.pages)].sort((a, b) => a - b),
-      specSection: item.specSection && item.specSection !== "Not found" ? item.specSection : undefined,
-      products: item.products || undefined,
+      pages: aiPages,
+      specSection,
+      products,
     });
   }
 
