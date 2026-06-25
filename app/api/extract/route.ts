@@ -49,23 +49,36 @@ function requiresWordBoundary(company: string) {
   );
 }
 
+// Returns true if `company` appears in `normalizedText` (text that has already
+// been run through normalize()). Matching rules, in priority order:
+//
+//   1. Multi-word names ("Cornell Pump", "Trojan Technologies"): require a word
+//      boundary at the START only and leave the end open, so the list entry
+//      "Cornell Pump" still matches when the document writes the fuller form
+//      "Cornell Pump Company" / "Inc." / "LLC". The leading \b keeps the first
+//      word from firing inside an unrelated word (so "Cornell" never matches
+//      "Cornellville").
+//   2. Short acronyms and single-word generic terms (SSI, Aqua, Orthos): require
+//      a boundary on BOTH ends so they don't match inside larger words.
+//   3. Everything else: a plain substring check.
 function companyMatchesText(company: string, normalizedText: string) {
   const needle = normalize(company);
+  if (needle.includes(" ")) {
+    return new RegExp(`\\b${escapeRegExp(needle)}`, "i").test(normalizedText);
+  }
   if (requiresWordBoundary(company)) {
     return new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i").test(normalizedText);
   }
   return normalizedText.includes(needle);
 }
 
+// Two names refer to the same company if either one matches inside the other
+// under the same rules used to match against document text. This lets the list
+// entry "Cornell Pump" dedupe against the AI's "Cornell Pump Company".
 function namesOverlap(a: string, b: string) {
-  const na = normalize(a);
-  const nb = normalize(b);
-  if (requiresWordBoundary(a) || requiresWordBoundary(b)) {
-    const containsWhole = (needle: string, haystack: string) =>
-      new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i").test(haystack);
-    return containsWhole(na, nb) || containsWhole(nb, na);
-  }
-  return na.includes(nb) || nb.includes(na);
+  return (
+    companyMatchesText(a, normalize(b)) || companyMatchesText(b, normalize(a))
+  );
 }
 
 // Division 46 (Water and Wastewater Equipment) section headers show up in a
