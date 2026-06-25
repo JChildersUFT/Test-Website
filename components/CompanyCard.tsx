@@ -1,11 +1,26 @@
 type Props = {
   company: string;
   pages: number[];
-  products?: string[];
+  specSection?: string;
+  products?: string;
   variant: "known" | "ai";
 };
 
-export default function CompanyCard({ company, pages, products, variant }: Props) {
+function formatSpecSection(section: string) {
+  const trimmed = section.trim();
+  if (/^section\s+/i.test(trimmed)) {
+    return `§${trimmed.replace(/^section\s+/i, "")}`;
+  }
+  return trimmed.startsWith("§") ? trimmed : `§${trimmed}`;
+}
+
+export default function CompanyCard({
+  company,
+  pages,
+  specSection,
+  products,
+  variant,
+}: Props) {
   const isKnown = variant === "known";
 
   return (
@@ -59,10 +74,12 @@ export default function CompanyCard({ company, pages, products, variant }: Props
         </div>
       )}
 
-      {products && products.length > 0 && (
-        <p className="mt-2 text-xs leading-snug text-secondary">
-          {products.join(", ")}
-        </p>
+      {specSection && (
+        <p className="mt-2 text-xs text-gray-400">{formatSpecSection(specSection)}</p>
+      )}
+
+      {products && (
+        <p className="mt-1 text-xs leading-snug text-secondary">{products}</p>
       )}
     </div>
   );

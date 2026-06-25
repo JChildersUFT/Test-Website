@@ -9,9 +9,30 @@ export const runtime = "nodejs";
 
 const KNOWN_COMPANIES = companiesData as string[];
 const MAX_TEXT_CHARS = 120_000;
-// Acronyms this short (SSI, GEA, VPC, AWC, ...) need a word-boundary match —
-// a plain substring check would also fire inside unrelated longer words.
+const FRONT_MATTER_PAGE_LIMIT = 15;
+const MODEL = "claude-sonnet-4-6";
+
+// Acronyms this short (SSI, GEA, VPC, AWC, Aqua, ...) need a word-boundary
+// match — a plain substring check would also fire inside unrelated words.
 const SHORT_NAME_LENGTH = 4;
+
+// These names are also common English words or generic terms. Even though
+// they're longer than the short-acronym threshold, a plain substring match
+// would false-positive on unrelated text (e.g. "United" inside "United
+// States", "Johnson" as a surname). Force a whole-phrase, word-boundary
+// match for them too.
+const GENERIC_FULL_PHRASE_NAMES = new Set(
+  [
+    "Nordic Water",
+    "Force Flow",
+    "United Flo",
+    "Johnson Screens",
+    "Gardner Denver",
+    "Daniel Company",
+    "Orthos",
+    "Marcab",
+  ].map((name) => normalize(name))
+);
 
 function normalize(text: string) {
   return text.replace(/\s+/g, " ").toLowerCase().trim();
@@ -21,9 +42,16 @@ function escapeRegExp(text: string) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function requiresWordBoundary(company: string) {
+  return (
+    company.length <= SHORT_NAME_LENGTH ||
+    GENERIC_FULL_PHRASE_NAMES.has(normalize(company))
+  );
+}
+
 function companyMatchesText(company: string, normalizedText: string) {
   const needle = normalize(company);
-  if (company.length <= SHORT_NAME_LENGTH) {
+  if (requiresWordBoundary(company)) {
     return new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i").test(normalizedText);
   }
   return normalizedText.includes(needle);
@@ -32,7 +60,7 @@ function companyMatchesText(company: string, normalizedText: string) {
 function namesOverlap(a: string, b: string) {
   const na = normalize(a);
   const nb = normalize(b);
-  if (a.length <= SHORT_NAME_LENGTH || b.length <= SHORT_NAME_LENGTH) {
+  if (requiresWordBoundary(a) || requiresWordBoundary(b)) {
     const containsWhole = (needle: string, haystack: string) =>
       new RegExp(`\\b${escapeRegExp(needle)}\\b`, "i").test(haystack);
     return containsWhole(na, nb) || containsWhole(nb, na);
@@ -40,10 +68,22 @@ function namesOverlap(a: string, b: string) {
   return na.includes(nb) || nb.includes(na);
 }
 
-interface RawAiCompany {
-  company: string;
-  pages: number[];
-  products: string[];
+// Division 46 (Water and Wastewater Equipment) section headers look like
+// "SECTION 46 5103" or just show the bare number "46 5103" / "46-5103" in a
+// running header. Catch both forms.
+const DIVISION_46_PATTERNS = [/\bSECTION\s+46\b/i, /\b46[\s-]?\d{4}\b/];
+
+function isDivision46Page(text: string) {
+  return DIVISION_46_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+type PageText = { page: number; text: string };
+
+function buildAnnotatedText(pageList: PageText[]) {
+  return pageList
+    .map((p) => `[Page ${p.page}]\n${p.text.replace(/\s+/g, " ").trim()}`)
+    .join("\n\n")
+    .slice(0, MAX_TEXT_CHARS);
 }
 
 const SUMMARY_FIELDS = [
@@ -67,6 +107,13 @@ function sanitizeSummary(value: unknown): ProjectSummary {
     summary[field] = sanitizeSummaryField(raw[field]);
   }
   return summary;
+}
+
+interface RawAiCompany {
+  company: string;
+  pages: number[];
+  specSection: string;
+  products: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -151,7 +198,7 @@ export async function POST(req: NextRequest) {
 }
 
 async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
-  const pages: { page: number; text: string }[] = [];
+  const pages: PageText[] = [];
 
   try {
     await pdfParse(bytes, {
@@ -193,19 +240,6 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     );
   }
 
-  // PDF extraction can introduce irregular whitespace (runs of spaces from
-  // justified text, newlines at line-wrap points) that splits up phrases
-  // which are visually contiguous, breaking a plain substring match.
-  const knownMatches: KnownMatch[] = [];
-  for (const company of KNOWN_COMPANIES) {
-    const matchedPages = pages
-      .filter((p) => companyMatchesText(company, normalize(p.text)))
-      .map((p) => p.page);
-    if (matchedPages.length > 0) {
-      knownMatches.push({ company, pages: matchedPages });
-    }
-  }
-
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
@@ -216,51 +250,147 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
 
   const anthropic = new Anthropic({ apiKey });
 
-  const annotatedText = pages
-    .map((p) => `[Page ${p.page}]\n${p.text.replace(/\s+/g, " ").trim()}`)
-    .join("\n\n")
-    .slice(0, MAX_TEXT_CHARS);
+  // Pass 1 only ever looks at the front matter; Pass 2 only ever looks at
+  // Division 46 pages. Page numbers in both passes refer to the original
+  // document throughout — neither pass renumbers anything.
+  const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
+  const division46Pages = pages.filter((p) => isDivision46Page(p.text));
 
-  let aiCompanies: RawAiCompany[] = [];
-  let summary: ProjectSummary = sanitizeSummary(undefined);
+  const [summary, aiCompanies] = await Promise.all([
+    runSummaryPass(anthropic, frontMatterPages),
+    runCompanyPass(anthropic, division46Pages),
+  ]);
+
+  // PDF extraction can introduce irregular whitespace (runs of spaces from
+  // justified text, newlines at line-wrap points) that splits up phrases
+  // which are visually contiguous, breaking a plain substring match.
+  const knownMatches: KnownMatch[] = [];
+  for (const company of KNOWN_COMPANIES) {
+    const matchedPages = division46Pages
+      .filter((p) => companyMatchesText(company, normalize(p.text)))
+      .map((p) => p.page);
+    if (matchedPages.length > 0) {
+      knownMatches.push({ company, pages: matchedPages });
+    }
+  }
+
+  const seen = new Set<string>();
+  const aiDetected: AiDetected[] = [];
+
+  for (const item of aiCompanies) {
+    const key = normalize(item.company);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const knownMatch = knownMatches.find((k) => namesOverlap(k.company, item.company));
+    if (knownMatch) {
+      if (item.specSection && item.specSection !== "Not found") {
+        knownMatch.specSection = item.specSection;
+      }
+      if (item.products) {
+        knownMatch.products = item.products;
+      }
+      continue;
+    }
+
+    aiDetected.push({
+      company: item.company,
+      pages: [...new Set(item.pages)].sort((a, b) => a - b),
+      specSection: item.specSection && item.specSection !== "Not found" ? item.specSection : undefined,
+      products: item.products || undefined,
+    });
+  }
+
+  return NextResponse.json({ summary, knownMatches, aiDetected });
+}
+
+async function runSummaryPass(
+  anthropic: Anthropic,
+  frontMatterPages: PageText[]
+): Promise<ProjectSummary> {
+  if (frontMatterPages.length === 0) {
+    return sanitizeSummary(undefined);
+  }
+
+  const annotatedText = buildAnnotatedText(frontMatterPages);
+
   try {
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4096,
+      model: MODEL,
+      max_tokens: 1024,
       tools: [
         {
-          name: "extract_spec_sheet_info",
+          name: "extract_project_summary",
           description:
-            "Record the project summary and every distinct company or manufacturer mentioned in the document, the page numbers each appears on, and the specific products or applications each is being specified for.",
+            "Extract project-level summary information from the front matter of a specification document.",
           input_schema: {
             type: "object",
             properties: {
-              summary: {
-                type: "object",
-                description:
-                  "Project-level information, typically found on a cover page, title sheet, or in general/bid information sections. Use the exact string \"Not found\" for any field that is not present in the document.",
-                properties: {
-                  projectName: { type: "string" },
-                  projectNumber: { type: "string" },
-                  location: { type: "string" },
-                  owner: { type: "string" },
-                  engineer: { type: "string" },
-                  bidDate: { type: "string" },
-                  scopeOfWork: {
-                    type: "string",
-                    description: "A brief description of the overall scope of work covered by this document.",
-                  },
-                },
-                required: [
-                  "projectName",
-                  "projectNumber",
-                  "location",
-                  "owner",
-                  "engineer",
-                  "bidDate",
-                  "scopeOfWork",
-                ],
+              projectName: { type: "string" },
+              projectNumber: { type: "string" },
+              location: { type: "string" },
+              owner: { type: "string" },
+              engineer: { type: "string" },
+              bidDate: { type: "string" },
+              scopeOfWork: {
+                type: "string",
+                description: "A brief description of the overall scope of work covered by this document.",
               },
+            },
+            required: [
+              "projectName",
+              "projectNumber",
+              "location",
+              "owner",
+              "engineer",
+              "bidDate",
+              "scopeOfWork",
+            ],
+          },
+        },
+      ],
+      tool_choice: { type: "tool", name: "extract_project_summary" },
+      messages: [
+        {
+          role: "user",
+          content: `The following is the front matter of a specification document (cover page, title sheet, general/bid information), annotated with [Page N] markers showing the original page number each block of text came from. Extract the project name, project number, location, owner, engineer, bid date, and scope of work. Use "Not found" for any field that isn't present in this text.\n\n${annotatedText}`,
+        },
+      ],
+    });
+
+    const toolUse = message.content.find((block) => block.type === "tool_use");
+    if (toolUse && toolUse.type === "tool_use") {
+      return sanitizeSummary(toolUse.input);
+    }
+  } catch (err) {
+    console.error("Summary pass error:", err);
+  }
+
+  return sanitizeSummary(undefined);
+}
+
+async function runCompanyPass(
+  anthropic: Anthropic,
+  division46Pages: PageText[]
+): Promise<RawAiCompany[]> {
+  if (division46Pages.length === 0) {
+    return [];
+  }
+
+  const annotatedText = buildAnnotatedText(division46Pages);
+
+  try {
+    const message = await anthropic.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      tools: [
+        {
+          name: "extract_companies",
+          description:
+            "Record every distinct company or manufacturer mentioned in this Division 46 (Water and Wastewater Equipment) spec text, the page numbers each appears on, its spec section, and the specific product or application it is being specified for.",
+          input_schema: {
+            type: "object",
+            properties: {
               companies: {
                 type: "array",
                 items: {
@@ -274,94 +404,63 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
                       type: "array",
                       items: { type: "integer" },
                       description:
-                        "Page numbers (matching the [Page N] markers in the text) where this company is mentioned.",
+                        "Page numbers (matching the [Page N] markers in the text, i.e. the original document's page numbers) where this company is mentioned.",
+                    },
+                    specSection: {
+                      type: "string",
+                      description:
+                        "The spec section number and title this mention falls under, e.g. 'Section 46 5103 - Air Diffusers'. Use \"Not found\" if no section heading is visible near the mention.",
                     },
                     products: {
-                      type: "array",
-                      items: { type: "string" },
+                      type: "string",
                       description:
-                        "Specific products or applications this company's equipment is being specified for, based on the surrounding spec section (section number, section title, and the paragraph the mention appears in). Include the spec section number and title when visible, e.g. 'Section 46 5103 - Air Diffusers: coarse bubble diffusers for sludge holding tank aeration'. Describe the actual application, not just a generic product category or the company name alone.",
+                        "A specific description of the product or application this company's equipment is being specified for, based on the surrounding section and paragraph, e.g. 'Coarse bubble diffusers for sludge holding tank aeration'. Describe the actual application, not just a generic product category or the company name alone.",
                     },
                   },
-                  required: ["company", "pages", "products"],
+                  required: ["company", "pages", "specSection", "products"],
                 },
               },
             },
-            required: ["summary", "companies"],
+            required: ["companies"],
           },
         },
       ],
-      tool_choice: { type: "tool", name: "extract_spec_sheet_info" },
+      tool_choice: { type: "tool", name: "extract_companies" },
       messages: [
         {
           role: "user",
-          content: `Read the following equipment spec sheet text, annotated with [Page N] markers showing which page each block of text came from.
+          content: `The following is Division 46 (Water and Wastewater Equipment) text extracted from a specification document, annotated with [Page N] markers showing the original page number each block of text came from.
 
-1. Extract a project summary: project name, project number, location, owner, engineer, bid date, and scope of work. Look at the cover page, title sheet, or general/bid information sections. Use "Not found" for any field that isn't present in the document.
-
-2. List every company or manufacturer mentioned, the page numbers each appears on, and the specific products or applications it is being specified for. Look at the surrounding spec section (section number, section title, and the paragraph around the mention) to determine what the company's equipment is actually being used for. Include the spec section number and title when visible (e.g. "Section 46 5103 - Air Diffusers"). Be specific about the product/application — e.g. "coarse bubble diffusers for sludge holding tank aeration" rather than just "diffusers" or just the company name.
+For every company or manufacturer mentioned:
+- Look at the surrounding spec section number and title for each mention.
+- Describe the specific product or application it is being specified for, not just the company name.
+- Use the original page numbers shown in the [Page N] markers.
 
 ${annotatedText}`,
         },
       ],
     });
 
-    const toolUse = message.content.find(
-      (block) => block.type === "tool_use"
-    );
+    const toolUse = message.content.find((block) => block.type === "tool_use");
     if (toolUse && toolUse.type === "tool_use") {
-      const input = toolUse.input as { summary?: unknown; companies?: unknown };
-      summary = sanitizeSummary(input.summary);
+      const input = toolUse.input as { companies?: unknown };
       if (Array.isArray(input.companies)) {
-        aiCompanies = input.companies
-          .filter(
-            (c): c is Record<string, unknown> =>
-              typeof c === "object" && c !== null
-          )
+        return input.companies
+          .filter((c): c is Record<string, unknown> => typeof c === "object" && c !== null)
           .map((c) => ({
             company: typeof c.company === "string" ? c.company.trim() : "",
             pages: Array.isArray(c.pages)
               ? c.pages.filter((p): p is number => typeof p === "number")
               : [],
-            products: Array.isArray(c.products)
-              ? c.products.filter(
-                  (p): p is string => typeof p === "string" && p.trim().length > 0
-                )
-              : [],
+            specSection: typeof c.specSection === "string" ? c.specSection.trim() : "Not found",
+            products: typeof c.products === "string" ? c.products.trim() : "",
           }))
           .filter((c) => c.company.length > 0);
       }
     }
   } catch (err) {
-    console.error("Anthropic API error:", err);
-    return NextResponse.json(
-      { error: "The AI analysis failed. Please try again." },
-      { status: 502 }
-    );
+    console.error("Company pass error:", err);
   }
 
-  const seen = new Set<string>();
-  const aiDetected: AiDetected[] = [];
-
-  for (const item of aiCompanies) {
-    const key = normalize(item.company);
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    const knownMatch = knownMatches.find((k) => namesOverlap(k.company, item.company));
-    if (knownMatch) {
-      if (item.products.length > 0) {
-        knownMatch.products = [...new Set([...(knownMatch.products ?? []), ...item.products])];
-      }
-      continue;
-    }
-
-    aiDetected.push({
-      company: item.company,
-      pages: [...new Set(item.pages)].sort((a, b) => a - b),
-      products: item.products,
-    });
-  }
-
-  return NextResponse.json({ summary, knownMatches, aiDetected });
+  return [];
 }

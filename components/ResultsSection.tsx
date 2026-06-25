@@ -58,6 +58,7 @@ export default function ResultsSection({
                       key={m.company}
                       company={m.company}
                       pages={m.pages}
+                      specSection={m.specSection}
                       products={m.products}
                       variant="known"
                     />
@@ -85,6 +86,7 @@ export default function ResultsSection({
                       key={m.company}
                       company={m.company}
                       pages={m.pages}
+                      specSection={m.specSection}
                       products={m.products}
                       variant="ai"
                     />
