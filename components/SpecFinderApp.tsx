@@ -41,6 +41,9 @@ export default function SpecFinderApp() {
         const blob = await upload(file.name, file, {
           access: "private",
           handleUploadUrl: "/api/upload-url",
+          // Split large files into chunks uploaded in parallel (with retries).
+          // Required for reliable uploads of files well beyond 50MB.
+          multipart: true,
         });
         res = await fetch("/api/extract", {
           method: "POST",

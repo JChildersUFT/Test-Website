@@ -6,6 +6,10 @@ import companiesData from "@/data/companies.json";
 import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
 
 export const runtime = "nodejs";
+// Large PDFs (50MB+) take longer to download from Blob, parse, and run two
+// Claude passes over. Claim the full 5-minute function timeout instead of the
+// platform default.
+export const maxDuration = 300;
 
 const KNOWN_COMPANIES = companiesData as string[];
 const MAX_TEXT_CHARS = 120_000;

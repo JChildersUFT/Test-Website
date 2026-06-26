@@ -13,7 +13,9 @@ export async function POST(request: NextRequest) {
       onBeforeGenerateToken: async () => ({
         allowedContentTypes: ["application/pdf"],
         addRandomSuffix: true,
-        maximumSizeInBytes: 50 * 1024 * 1024,
+        // Allow large spec sets. The previous 50MB cap rejected the upload
+        // token before processing for files at/above that size (e.g. ~56MB).
+        maximumSizeInBytes: 500 * 1024 * 1024,
       }),
     });
 
