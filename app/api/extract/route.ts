@@ -95,6 +95,14 @@ const DIVISION_46_PATTERNS = [
   /division\s*46/i,
   /section\s*46/i,
   /4[65]\s*\d{4}/i,
+  // No-space variants. PDF text extraction sometimes drops the space between
+  // the division and section digits ("460500" instead of "46 0500"). The \s*
+  // patterns above already tolerate this; these explicit no-space variants are
+  // added alongside them (never replacing them) as an extra safety net.
+  /46\d{4}/,
+  /division46/i,
+  /section46/i,
+  /4[65]\d{4}/i,
 ];
 
 function isDivision46Page(text: string) {
@@ -102,6 +110,160 @@ function isDivision46Page(text: string) {
 }
 
 type PageText = { page: number; text: string };
+
+// ---------------------------------------------------------------------------
+// Tiered page detection
+//
+//   Tier 1  Division 46 (MasterFormat 2004+)         isDivision46Page
+//   Tier 2  alternate divisions + legacy 5-digit      isAlternateDivisionPage
+//                                                      / isLegacy5DigitPage
+//   Tier 3  process/equipment keyword scan            isKeywordPage
+//   Tier 4  full-document fallback
+//
+// Each tier is only consulted when every higher tier found nothing, so a
+// well-formed Division 46 document never reaches the looser tiers.
+// ---------------------------------------------------------------------------
+
+// Tier 2a — alternate MasterFormat 2004+ divisions that also carry water /
+// wastewater equipment: 15 (legacy mechanical), 11 (equipment), 13 (special
+// construction), 22 (plumbing), 43 (process gas & liquid handling). Mirrors the
+// deliberately-loose Division 46 approach: division/section headers plus
+// six-digit section numbers, space-optional.
+const ALTERNATE_DIVISION_PATTERNS = [
+  /division\s*1[135]/i,
+  /division\s*22/i,
+  /division\s*43/i,
+  /section\s*22/i,
+  /section\s*43/i,
+  // Six-digit (2004+) section numbers, space-optional. Deliberately not a bare
+  // "SECTION 11/13/15" word match — that collides with legacy 5-digit headers
+  // ("SECTION 11044", "SECTION 11"), which the Tier 2b legacy detector owns so
+  // they get the correct MasterFormat-legacy-5digit label.
+  /\b1[135]\s*\d{4}\b/,
+  /\b22\s*\d{4}\b/,
+  /\b43\s*\d{4}\b/,
+];
+
+function isAlternateDivisionPage(text: string) {
+  return ALTERNATE_DIVISION_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+// Tier 2b — old MasterFormat 5-digit flat numbering used by pre-2004 and many
+// state-agency specs. The number must stand alone (\b…\b) so we don't fire on
+// phone numbers or quantities, and the page must also carry at least one
+// process/equipment keyword so a stray 5-digit code can't pull in an unrelated
+// page.
+const LEGACY_5DIGIT_PATTERNS = [
+  /\b11\d{3}\b/, // Division 11 — equipment (pumps, chemical feed, UV, filters)
+  /\b13\d{3}\b/, // Division 13 — special construction / tanks
+  /\b15\d{3}\b/, // Division 15 — mechanical / piping / valves
+  /\b17\d{3}\b/, // Division 17 — instrumentation / controls
+];
+
+// Division 11 also commonly appears as a bare "SECTION 11" header.
+const LEGACY_SECTION_11 = /\bsection\s*11\b/i;
+
+const PROCESS_KEYWORDS = [
+  "pump",
+  "valve",
+  "chemical",
+  "filter",
+  "uv",
+  "disinfection",
+  "piping",
+  "blower",
+  "aeration",
+  "treatment",
+];
+
+function hasProcessKeyword(lowerText: string) {
+  return PROCESS_KEYWORDS.some((keyword) => lowerText.includes(keyword));
+}
+
+function isLegacy5DigitPage(text: string) {
+  if (!hasProcessKeyword(text.toLowerCase())) return false;
+  return (
+    LEGACY_5DIGIT_PATTERNS.some((pattern) => pattern.test(text)) ||
+    LEGACY_SECTION_11.test(text)
+  );
+}
+
+// Tier 3 — keyword scan. No keyword list existed before this change, so the
+// base is seeded from the Tier 2 process/equipment keywords and extended with
+// the broader water/wastewater spec vocabulary below. A page qualifies when it
+// contains at least TIER3_MIN_KEYWORDS of these terms.
+const TIER3_MIN_KEYWORDS = 1;
+
+const TIER3_KEYWORDS = [
+  ...PROCESS_KEYWORDS,
+  "water treatment",
+  "vertical turbine",
+  "inline mixer",
+  "cartridge filter",
+  "chemical feed system",
+  "well pump",
+  "elevated tank",
+  "vfd",
+  "variable frequency",
+  "instrumentation",
+  "scada",
+  "telemetry",
+  "fittings",
+  "hangers",
+  "supports",
+  "coatings",
+  "painting",
+  "approved equal",
+  "basis of design",
+];
+
+function isKeywordPage(text: string) {
+  const lower = text.toLowerCase();
+  let hits = 0;
+  for (const keyword of TIER3_KEYWORDS) {
+    if (lower.includes(keyword)) {
+      hits += 1;
+      if (hits >= TIER3_MIN_KEYWORDS) return true;
+    }
+  }
+  return false;
+}
+
+type Detection = { pages: PageText[]; tier: number; format: string };
+
+// Walks the tiers in order and returns the first non-empty selection, falling
+// back to the full document. Preserves the original per-tier log lines.
+function detectRelevantPages(allPages: PageText[]): Detection {
+  // Tier 1 — Division 46 (MasterFormat 2004+).
+  const tier1Pages = allPages.filter((p) => isDivision46Page(p.text));
+  console.log("Division 46 pages found:", tier1Pages.length, "of", allPages.length);
+  if (tier1Pages.length > 0) {
+    return { pages: tier1Pages, tier: 1, format: "MasterFormat-2004+" };
+  }
+
+  // Tier 2 — alternate divisions (modern six-digit) and legacy 5-digit flat
+  // numbering. A modern alternate-division match keeps the 2004+ format label;
+  // otherwise the selection came from the legacy numbering.
+  const modernPages = allPages.filter((p) => isAlternateDivisionPage(p.text));
+  const legacyPages = allPages.filter((p) => isLegacy5DigitPage(p.text));
+  if (modernPages.length > 0 || legacyPages.length > 0) {
+    const wanted = new Set([...modernPages, ...legacyPages].map((p) => p.page));
+    const tier2Pages = allPages.filter((p) => wanted.has(p.page));
+    const format =
+      modernPages.length > 0 ? "MasterFormat-2004+" : "MasterFormat-legacy-5digit";
+    return { pages: tier2Pages, tier: 2, format };
+  }
+
+  // Tier 3 — process/equipment keyword scan.
+  const tier3Pages = allPages.filter((p) => isKeywordPage(p.text));
+  if (tier3Pages.length > 0) {
+    return { pages: tier3Pages, tier: 3, format: "keyword" };
+  }
+
+  // Tier 4 — full-document fallback (unchanged behavior).
+  console.warn("No Division 46 pages detected — falling back to full document");
+  return { pages: allPages, tier: 4, format: "full-document" };
+}
 
 function buildAnnotatedText(pageList: PageText[]) {
   return pageList
@@ -274,22 +436,27 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
 
   const anthropic = new Anthropic({ apiKey });
 
-  // Pass 1 only ever looks at the front matter; Pass 2 only ever looks at
-  // Division 46 pages. Page numbers in both passes refer to the original
-  // document throughout — neither pass renumbers anything.
+  // Pass 1 only ever looks at the front matter; Pass 2 looks at the pages the
+  // tiered detector selects (see detectRelevantPages). Page numbers in both
+  // passes refer to the original document throughout — neither pass renumbers
+  // anything.
   const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
-  let division46Pages = pages.filter((p) => isDivision46Page(p.text));
 
-  console.log("Division 46 pages found:", division46Pages.length, "of", pages.length);
-
-  if (division46Pages.length === 0) {
-    console.warn("No Division 46 pages detected — falling back to full document");
-    division46Pages = pages;
-  }
+  const { pages: relevantPages, tier, format } = detectRelevantPages(pages);
+  console.log(
+    "Detection tier:",
+    tier,
+    "| Format:",
+    format,
+    "| Pages:",
+    relevantPages.length,
+    "of",
+    pages.length
+  );
 
   const [summary, aiCompanies] = await Promise.all([
     runSummaryPass(anthropic, frontMatterPages),
-    runCompanyPass(anthropic, division46Pages),
+    runCompanyPass(anthropic, relevantPages),
   ]);
 
   // PDF extraction can introduce irregular whitespace (runs of spaces from
@@ -297,7 +464,7 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
   // which are visually contiguous, breaking a plain substring match.
   const knownMatches: KnownMatch[] = [];
   for (const company of KNOWN_COMPANIES) {
-    const matchedPages = division46Pages
+    const matchedPages = relevantPages
       .filter((p) => companyMatchesText(company, normalize(p.text)))
       .map((p) => p.page);
     if (matchedPages.length > 0) {
