@@ -9,7 +9,6 @@ import FeedbackSection from "./FeedbackSection";
 import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
-type EmailStatus = "idle" | "sending" | "sent" | "error";
 
 // Vercel's serverless functions cap request bodies at 4.5MB. Files under
 // that go straight to /api/extract; larger ones upload directly to Blob
@@ -23,36 +22,11 @@ export default function SpecFinderApp() {
   const [knownMatches, setKnownMatches] = useState<KnownMatch[]>([]);
   const [aiDetected, setAiDetected] = useState<AiDetected[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [email, setEmail] = useState("");
-  const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
-
-  const sendResultsEmail = async (
-    to: string,
-    results: {
-      summary: ProjectSummary | null;
-      knownMatches: KnownMatch[];
-      aiDetected: AiDetected[];
-    }
-  ) => {
-    setEmailStatus("sending");
-    try {
-      const res = await fetch("/api/send-results", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: to, ...results }),
-      });
-      if (!res.ok) throw new Error("send failed");
-      setEmailStatus("sent");
-    } catch {
-      setEmailStatus("error");
-    }
-  };
 
   const handleFile = async (file: File) => {
     setStatus("loading");
     setFileName(file.name);
     setErrorMsg(null);
-    setEmailStatus("idle");
 
     try {
       let res: Response;
@@ -85,21 +59,10 @@ export default function SpecFinderApp() {
         throw new Error(data.error || "Something went wrong. Please try again.");
       }
 
-      const results = {
-        summary: (data.summary ?? null) as ProjectSummary | null,
-        knownMatches: (data.knownMatches ?? []) as KnownMatch[],
-        aiDetected: (data.aiDetected ?? []) as AiDetected[],
-      };
-
-      setSummary(results.summary);
-      setKnownMatches(results.knownMatches);
-      setAiDetected(results.aiDetected);
+      setSummary(data.summary ?? null);
+      setKnownMatches(data.knownMatches ?? []);
+      setAiDetected(data.aiDetected ?? []);
       setStatus("done");
-
-      const trimmedEmail = email.trim();
-      if (trimmedEmail) {
-        void sendResultsEmail(trimmedEmail, results);
-      }
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Something went wrong. Please try again."
@@ -121,41 +84,9 @@ export default function SpecFinderApp() {
             partner list.
           </p>
 
-          <div className="mx-auto mt-10 max-w-md">
-            <label
-              htmlFor="results-email"
-              className="block text-sm font-medium text-navy"
-            >
-              Email results to me{" "}
-              <span className="font-normal text-secondary">(optional)</span>
-            </label>
-            <input
-              id="results-email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              className="mt-2 w-full rounded-lg border border-light-blue bg-white px-4 py-2.5 text-sm text-navy outline-none placeholder:text-secondary focus:border-primary focus:ring-2 focus:ring-primary/20"
-            />
-          </div>
-
-          <div className="mt-6">
+          <div className="mt-10">
             <UploadZone status={status} fileName={fileName} onFile={handleFile} />
           </div>
-
-          {status === "done" && emailStatus !== "idle" && (
-            <p
-              className={`mt-4 text-center text-sm font-medium ${
-                emailStatus === "error" ? "text-red-600" : "text-teal"
-              }`}
-              role="status"
-            >
-              {emailStatus === "sending" && "Emailing your results…"}
-              {emailStatus === "sent" && `Results sent to ${email.trim()}.`}
-              {emailStatus === "error" &&
-                "We couldn't email your results, but they're shown below."}
-            </p>
-          )}
         </div>
       </section>
 

@@ -1,5 +1,6 @@
 import CompanyCard from "./CompanyCard";
 import SummaryCard from "./SummaryCard";
+import DownloadResultsButton from "./DownloadResultsButton";
 import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
@@ -42,6 +43,17 @@ export default function ResultsSection({
 
         {status === "done" && (
           <div className="flex flex-col gap-10">
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-sm text-secondary">
+                Analysis complete. Download a copy for your records.
+              </p>
+              <DownloadResultsButton
+                summary={summary}
+                knownMatches={knownMatches}
+                aiDetected={aiDetected}
+              />
+            </div>
+
             {summary && <SummaryCard summary={summary} />}
 
             <div>
