@@ -149,20 +149,30 @@ function isAlternateDivisionPage(text: string) {
 }
 
 // Tier 2b — old MasterFormat 5-digit flat numbering used by pre-2004 and many
-// state-agency specs. The number must stand alone (\b…\b) so we don't fire on
-// phone numbers or quantities, and the page must also carry at least one
-// process/equipment keyword so a stray 5-digit code can't pull in an unrelated
-// page.
+// state-agency specs. A standalone 5-digit section number (\b…\b, so phone
+// numbers and quantities don't match) in one of these ranges is enough on its
+// own to flag the page. There is intentionally no keyword co-occurrence
+// requirement — that check was excluding valid manufacturer pages.
 const LEGACY_5DIGIT_PATTERNS = [
+  /\b02\d{3}\b/, // Division 02 — site work / utilities (process piping, pump stations)
   /\b11\d{3}\b/, // Division 11 — equipment (pumps, chemical feed, UV, filters)
   /\b13\d{3}\b/, // Division 13 — special construction / tanks
   /\b15\d{3}\b/, // Division 15 — mechanical / piping / valves
   /\b17\d{3}\b/, // Division 17 — instrumentation / controls
+  /\b26\d{3}\b/, // Division 26 — electrical (VFDs, controls)
 ];
 
 // Division 11 also commonly appears as a bare "SECTION 11" header.
 const LEGACY_SECTION_11 = /\bsection\s*11\b/i;
 
+function isLegacy5DigitPage(text: string) {
+  return (
+    LEGACY_5DIGIT_PATTERNS.some((pattern) => pattern.test(text)) ||
+    LEGACY_SECTION_11.test(text)
+  );
+}
+
+// Seeds the Tier 3 keyword list below; no longer gates Tier 2b.
 const PROCESS_KEYWORDS = [
   "pump",
   "valve",
@@ -175,18 +185,6 @@ const PROCESS_KEYWORDS = [
   "aeration",
   "treatment",
 ];
-
-function hasProcessKeyword(lowerText: string) {
-  return PROCESS_KEYWORDS.some((keyword) => lowerText.includes(keyword));
-}
-
-function isLegacy5DigitPage(text: string) {
-  if (!hasProcessKeyword(text.toLowerCase())) return false;
-  return (
-    LEGACY_5DIGIT_PATTERNS.some((pattern) => pattern.test(text)) ||
-    LEGACY_SECTION_11.test(text)
-  );
-}
 
 // Tier 3 — keyword scan. No keyword list existed before this change, so the
 // base is seeded from the Tier 2 process/equipment keywords and extended with
@@ -229,13 +227,32 @@ function isKeywordPage(text: string) {
   return false;
 }
 
+// PDF text is extracted one page at a time, so a section header often lands on
+// a different page than the manufacturer list it introduces. Once a section is
+// detected on a page, also pull in the next few pages (in document order) so
+// lists that spill across page breaks are captured.
+const SECTION_LOOKAHEAD_PAGES = 3;
+
+function selectWithCarryForward(
+  allPages: PageText[],
+  isTrigger: (page: PageText) => boolean
+): PageText[] {
+  const included = new Set<number>();
+  for (let i = 0; i < allPages.length; i++) {
+    if (!isTrigger(allPages[i])) continue;
+    const end = Math.min(i + SECTION_LOOKAHEAD_PAGES, allPages.length - 1);
+    for (let j = i; j <= end; j++) included.add(j);
+  }
+  return [...included].sort((a, b) => a - b).map((i) => allPages[i]);
+}
+
 type Detection = { pages: PageText[]; tier: number; format: string };
 
 // Walks the tiers in order and returns the first non-empty selection, falling
 // back to the full document. Preserves the original per-tier log lines.
 function detectRelevantPages(allPages: PageText[]): Detection {
-  // Tier 1 — Division 46 (MasterFormat 2004+).
-  const tier1Pages = allPages.filter((p) => isDivision46Page(p.text));
+  // Tier 1 — Division 46 (MasterFormat 2004+), with section carry-forward.
+  const tier1Pages = selectWithCarryForward(allPages, (p) => isDivision46Page(p.text));
   console.log("Division 46 pages found:", tier1Pages.length, "of", allPages.length);
   if (tier1Pages.length > 0) {
     return { pages: tier1Pages, tier: 1, format: "MasterFormat-2004+" };
@@ -245,7 +262,7 @@ function detectRelevantPages(allPages: PageText[]): Detection {
   // numbering. A modern alternate-division match keeps the 2004+ format label;
   // otherwise the selection came from the legacy numbering.
   const modernPages = allPages.filter((p) => isAlternateDivisionPage(p.text));
-  const legacyPages = allPages.filter((p) => isLegacy5DigitPage(p.text));
+  const legacyPages = selectWithCarryForward(allPages, (p) => isLegacy5DigitPage(p.text));
   if (modernPages.length > 0 || legacyPages.length > 0) {
     const wanted = new Set([...modernPages, ...legacyPages].map((p) => p.page));
     const tier2Pages = allPages.filter((p) => wanted.has(p.page));
