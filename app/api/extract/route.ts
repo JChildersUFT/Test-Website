@@ -90,24 +90,39 @@ function namesOverlap(a: string, b: string) {
 // the bare number, "SECTION 46" with inconsistent spacing, "DIVISION 46",
 // or a section number that starts with 46 or 45. Deliberately loose: it's
 // far cheaper to include an extra page than to silently drop a real one.
+// Strict Division 46 (Water & Wastewater Equipment) detection. Requires a real
+// section number — "SECTION 46 0500" or a standalone 46-prefixed section number
+// in footer/subsection form ("460500" / "46 0500"). The generic word "SECTION"
+// or a bare "46" followed by loose digits must never match, since that fired on
+// procurement / contract pages ("Page 3 of 9", stray numbers).
 const DIVISION_46_PATTERNS = [
-  /46\s*\d{4}/,
-  /division\s*46/i,
-  /section\s*46/i,
-  /4[65]\s*\d{4}/i,
-  // No-space variants. PDF text extraction sometimes drops the space between
-  // the division and section digits ("460500" instead of "46 0500"). The \s*
-  // patterns above already tolerate this; these explicit no-space variants are
-  // added alongside them (never replacing them) as an extra safety net.
-  /46\d{4}/,
-  /division46/i,
-  /section46/i,
-  /4[65]\d{4}/i,
+  /SECTION\s+46\s*\d{4}/i, // header:            SECTION 46 0500
+  /\b46\d{4}\b/,           // footer/subsection: 460500
+  /\b46\s\d{4}\b/,         // footer/subsection: 46 0500
 ];
 
 function isDivision46Page(text: string) {
   return DIVISION_46_PATTERNS.some((pattern) => pattern.test(text));
 }
+
+// CSI spec-section headings — used to confirm a Tier 1 match is a real spec
+// section. Procurement / contract pages that happen to trip a number pattern
+// won't carry these.
+const SPEC_HEADING_PATTERNS = [
+  /\bPART\s+1\b/i,
+  /\bPART\s+2\b/i,
+  /\bPRODUCTS\b/i,
+  /\bEXECUTION\b/i,
+  /\bGENERAL\b/i,
+];
+
+function hasSpecHeading(text: string) {
+  return SPEC_HEADING_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+// Minimum number of strict Division 46 matches (before carry-forward) required
+// for Tier 1 to count as a real hit rather than a handful of false positives.
+const MIN_TIER1_PAGES = 3;
 
 type PageText = { page: number; text: string };
 
@@ -362,11 +377,26 @@ type Detection = { pages: PageText[]; tier: number; format: string };
 // Walks the tiers in order and returns the first non-empty selection, falling
 // back to the full document. Preserves the original per-tier log lines.
 function detectRelevantPages(allPages: PageText[]): Detection {
-  // Tier 1 — Division 46 (MasterFormat 2004+), with section carry-forward.
-  const tier1Pages = selectWithCarryForward(allPages, (p) => isDivision46Page(getPageText(p)));
-  console.log("Division 46 pages found:", tier1Pages.length, "of", allPages.length);
-  if (tier1Pages.length > 0) {
+  // Tier 1 — strict Division 46 (MasterFormat 2004+). A match only counts when
+  // at least MIN_TIER1_PAGES pages hit the strict pattern AND at least one of
+  // them carries a CSI spec heading (PART 1/2, PRODUCTS, EXECUTION, GENERAL);
+  // otherwise a few false number matches on procurement pages would masquerade
+  // as a Division 46 document. Carry-forward is applied only after that passes.
+  const tier1Triggers = allPages.filter((p) => isDivision46Page(getPageText(p)));
+  console.log("Division 46 pages found:", tier1Triggers.length, "of", allPages.length);
+  const tier1HasSpecHeading = tier1Triggers.some((p) => hasSpecHeading(getPageText(p)));
+  if (tier1Triggers.length >= MIN_TIER1_PAGES && tier1HasSpecHeading) {
+    const tier1Pages = selectWithCarryForward(allPages, (p) => isDivision46Page(getPageText(p)));
     return { pages: tier1Pages, tier: 1, format: "MasterFormat-2004+" };
+  }
+  if (tier1Triggers.length > 0) {
+    console.log(
+      "Tier 1 rejected —",
+      tier1Triggers.length,
+      "trigger page(s), spec heading present:",
+      tier1HasSpecHeading,
+      "— falling through to Tier 2"
+    );
   }
 
   // Tier 2 — alternate divisions (modern six-digit) and legacy 5-digit flat
@@ -576,6 +606,17 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     console.log(`Page ${i + 1} - has subsection pattern:`, /\d{5}\.\d{2}/.test(text));
     console.log(`Page ${i + 1} - has footer pattern:`, /\d{5}\s*-\s*\d+/.test(text));
     console.log(`Page ${i + 1} text preview:`, text.substring(0, 100));
+  });
+
+  // Focused debug for the mid-document pages the legacy 5-digit sections are
+  // expected on.
+  [360, 361, 362, 363, 364, 365].forEach((pageNum) => {
+    const page = pages[pageNum - 1];
+    const text = getPageText(page);
+    console.log(`Page ${pageNum} - SECTION pattern:`, /SECTION\s+\d{5}/i.test(text));
+    console.log(`Page ${pageNum} - subsection pattern:`, /\b\d{5}\.\d{2}\b/.test(text));
+    console.log(`Page ${pageNum} - footer pattern:`, /\b\d{5}\s*-\s*\d+\b/.test(text));
+    console.log(`Page ${pageNum} preview:`, text.substring(0, 150));
   });
 
   // Hard appendix/transcript cutoff: from the first appendix signal onward
