@@ -149,27 +149,44 @@ function isAlternateDivisionPage(text: string) {
 }
 
 // Tier 2b — old MasterFormat 5-digit flat numbering used by pre-2004 and many
-// state-agency specs. A standalone 5-digit section number (\b…\b, so phone
-// numbers and quantities don't match) in one of these ranges is enough on its
-// own to flag the page. There is intentionally no keyword co-occurrence
-// requirement — that check was excluding valid manufacturer pages.
+// state-agency specs. Interior pages rarely repeat the "SECTION 11226" header,
+// so we detect all three ways a legacy section number appears: the header, an
+// interior subsection reference (11226.03), and a page footer (11226 - 2). Each
+// pattern captures the bare 5-digit number so we can confirm it falls in one of
+// the legacy water/wastewater divisions before flagging the page. No keyword
+// co-occurrence is required — that check was excluding valid manufacturer pages.
 const LEGACY_5DIGIT_PATTERNS = [
-  /\b02\d{3}\b/, // Division 02 — site work / utilities (process piping, pump stations)
-  /\b11\d{3}\b/, // Division 11 — equipment (pumps, chemical feed, UV, filters)
-  /\b13\d{3}\b/, // Division 13 — special construction / tanks
-  /\b15\d{3}\b/, // Division 15 — mechanical / piping / valves
-  /\b17\d{3}\b/, // Division 17 — instrumentation / controls
-  /\b26\d{3}\b/, // Division 26 — electrical (VFDs, controls)
+  /\bSECTION\s+(\d{5})\b/gi, // header:      SECTION 11226
+  /\b(\d{5})\.\d{2}\b/g,     // subsection:  11226.03
+  /\b(\d{5})\s*-\s*\d+\b/g,  // page footer: 11226 - 2
 ];
 
-// Division 11 also commonly appears as a bare "SECTION 11" header.
-const LEGACY_SECTION_11 = /\bsection\s*11\b/i;
+// Legacy water/wastewater divisions: 02 (site work / utilities), 11 (equipment),
+// 13 (special construction), 15 (mechanical), 17 (instrumentation), 26 (electrical).
+function isLegacyDivision(section: number) {
+  return (
+    (section >= 2000 && section <= 2999) ||
+    (section >= 11000 && section <= 11999) ||
+    (section >= 13000 && section <= 13999) ||
+    (section >= 15000 && section <= 15999) ||
+    (section >= 17000 && section <= 17999) ||
+    (section >= 26000 && section <= 26999)
+  );
+}
 
 function isLegacy5DigitPage(text: string) {
-  return (
-    LEGACY_5DIGIT_PATTERNS.some((pattern) => pattern.test(text)) ||
-    LEGACY_SECTION_11.test(text)
-  );
+  for (const pattern of LEGACY_5DIGIT_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      if (isLegacyDivision(Number(match[1]))) return true;
+    }
+  }
+  return false;
+}
+
+// A page carries a real spec section if it matches Division 46 or a legacy
+// 5-digit section number — used to find where the real spec content ends.
+function isSpecSectionPage(text: string) {
+  return isDivision46Page(text) || isLegacy5DigitPage(text);
 }
 
 // Seeds the Tier 3 keyword list below; no longer gates Tier 2b.
@@ -244,6 +261,43 @@ function selectWithCarryForward(
     for (let j = i; j <= end; j++) included.add(j);
   }
   return [...included].sort((a, b) => a - b).map((i) => allPages[i]);
+}
+
+// Documents almost always end with appendices, general conditions, insurance,
+// and contract forms that generate false positives without adding manufacturer
+// data. Trim to the last page carrying a real spec section (plus a small buffer
+// for lists that spill past the final header), and never process the final
+// HARD_TAIL_PAGES unless a spec section actually appears within them.
+const END_MATTER_BUFFER_PAGES = 5;
+const HARD_TAIL_PAGES = 50;
+
+function trimEndMatter(allPages: PageText[]): PageText[] {
+  const n = allPages.length;
+  if (n === 0) return allPages;
+
+  // Scan from the end for the last page with a real spec section pattern.
+  let lastSpecIdx = -1;
+  for (let i = n - 1; i >= 0; i--) {
+    if (isSpecSectionPage(allPages[i].text)) {
+      lastSpecIdx = i;
+      break;
+    }
+  }
+
+  // No real spec content anywhere — don't trim; let tier detection decide.
+  if (lastSpecIdx === -1) return allPages;
+
+  let cutoff = lastSpecIdx + END_MATTER_BUFFER_PAGES;
+
+  // Hard cutoff: when the last real spec page is before the final
+  // HARD_TAIL_PAGES, no spec appears in that tail, so drop it entirely (buffer
+  // included) rather than letting the buffer spill into the appendices.
+  if (lastSpecIdx < n - HARD_TAIL_PAGES) {
+    cutoff = Math.min(cutoff, n - HARD_TAIL_PAGES - 1);
+  }
+
+  cutoff = Math.min(cutoff, n - 1);
+  return allPages.slice(0, cutoff + 1);
 }
 
 type Detection = { pages: PageText[]; tier: number; format: string };
@@ -456,10 +510,22 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
   // Pass 1 only ever looks at the front matter; Pass 2 looks at the pages the
   // tiered detector selects (see detectRelevantPages). Page numbers in both
   // passes refer to the original document throughout — neither pass renumbers
-  // anything.
+  // anything. Tier detection runs against a page set trimmed of trailing
+  // appendices / end matter; the front-matter summary pass is unaffected.
   const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
 
-  const { pages: relevantPages, tier, format } = detectRelevantPages(pages);
+  const detectionPages = trimEndMatter(pages);
+  if (detectionPages.length !== pages.length) {
+    console.log(
+      "End-matter trim:",
+      pages.length,
+      "->",
+      detectionPages.length,
+      "pages for detection"
+    );
+  }
+
+  const { pages: relevantPages, tier, format } = detectRelevantPages(detectionPages);
   console.log(
     "Detection tier:",
     tier,
@@ -468,7 +534,7 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     "| Pages:",
     relevantPages.length,
     "of",
-    pages.length
+    detectionPages.length
   );
 
   const [summary, aiCompanies] = await Promise.all([
