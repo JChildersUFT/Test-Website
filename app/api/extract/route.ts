@@ -111,6 +111,19 @@ function isDivision46Page(text: string) {
 
 type PageText = { page: number; text: string };
 
+// pdf-parse-fork hands us page objects, but defend against alternate shapes
+// (a raw string, or a `content` field) so text access never silently yields
+// undefined. Our own pagerender always produces { page, text }.
+function getPageText(page: unknown): string {
+  if (typeof page === "string") return page;
+  if (page && typeof page === "object") {
+    const record = page as { text?: unknown; content?: unknown };
+    if (typeof record.text === "string") return record.text;
+    if (typeof record.content === "string") return record.content;
+  }
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Tiered page detection
 //
@@ -278,7 +291,7 @@ function trimEndMatter(allPages: PageText[]): PageText[] {
   // Scan from the end for the last page with a real spec section pattern.
   let lastSpecIdx = -1;
   for (let i = n - 1; i >= 0; i--) {
-    if (isSpecSectionPage(allPages[i].text)) {
+    if (isSpecSectionPage(getPageText(allPages[i]))) {
       lastSpecIdx = i;
       break;
     }
@@ -300,13 +313,57 @@ function trimEndMatter(allPages: PageText[]): PageText[] {
   return allPages.slice(0, cutoff + 1);
 }
 
+const APPENDIX_SCAN_WINDOW = 150;
+
+// Signals that a page is appendix / meeting-transcript / contract boilerplate
+// rather than spec content. The email and "General Conditions" signals also
+// appear on legitimate spec pages, so the cutoff is only applied after the last
+// real spec section (see findAppendixCutoff).
+const APPENDIX_SIGNALS: RegExp[] = [
+  /In-Meeting Duration/i,
+  /Participants/i,
+  /\S+@\S+\.\S+/, // any email address
+  /General Conditions/i,
+  /Insurance Requirements/i,
+  /REVISED 10\/202/i,
+  /GC\/\d+/i, // GC/28, GC/48
+];
+
+function hasAppendixSignal(text: string) {
+  return APPENDIX_SIGNALS.some((pattern) => pattern.test(text));
+}
+
+// Index of the first page (within the last APPENDIX_SCAN_WINDOW pages) that
+// looks like appendix / transcript content — that page and everything after it
+// should be discarded. Returns -1 when there's nothing to cut. The scan never
+// starts at or before the last real spec-section page, so a stray email or
+// "General Conditions" reference on a genuine spec page can't gut the document.
+function findAppendixCutoff(allPages: PageText[]): number {
+  const n = allPages.length;
+  if (n === 0) return -1;
+
+  let lastSpecIdx = -1;
+  for (let i = n - 1; i >= 0; i--) {
+    if (isSpecSectionPage(getPageText(allPages[i]))) {
+      lastSpecIdx = i;
+      break;
+    }
+  }
+
+  const scanStart = Math.max(n - APPENDIX_SCAN_WINDOW, lastSpecIdx + 1);
+  for (let i = scanStart; i < n; i++) {
+    if (hasAppendixSignal(getPageText(allPages[i]))) return i;
+  }
+  return -1;
+}
+
 type Detection = { pages: PageText[]; tier: number; format: string };
 
 // Walks the tiers in order and returns the first non-empty selection, falling
 // back to the full document. Preserves the original per-tier log lines.
 function detectRelevantPages(allPages: PageText[]): Detection {
   // Tier 1 — Division 46 (MasterFormat 2004+), with section carry-forward.
-  const tier1Pages = selectWithCarryForward(allPages, (p) => isDivision46Page(p.text));
+  const tier1Pages = selectWithCarryForward(allPages, (p) => isDivision46Page(getPageText(p)));
   console.log("Division 46 pages found:", tier1Pages.length, "of", allPages.length);
   if (tier1Pages.length > 0) {
     return { pages: tier1Pages, tier: 1, format: "MasterFormat-2004+" };
@@ -315,8 +372,8 @@ function detectRelevantPages(allPages: PageText[]): Detection {
   // Tier 2 — alternate divisions (modern six-digit) and legacy 5-digit flat
   // numbering. A modern alternate-division match keeps the 2004+ format label;
   // otherwise the selection came from the legacy numbering.
-  const modernPages = allPages.filter((p) => isAlternateDivisionPage(p.text));
-  const legacyPages = selectWithCarryForward(allPages, (p) => isLegacy5DigitPage(p.text));
+  const modernPages = allPages.filter((p) => isAlternateDivisionPage(getPageText(p)));
+  const legacyPages = selectWithCarryForward(allPages, (p) => isLegacy5DigitPage(getPageText(p)));
   if (modernPages.length > 0 || legacyPages.length > 0) {
     const wanted = new Set([...modernPages, ...legacyPages].map((p) => p.page));
     const tier2Pages = allPages.filter((p) => wanted.has(p.page));
@@ -326,7 +383,7 @@ function detectRelevantPages(allPages: PageText[]): Detection {
   }
 
   // Tier 3 — process/equipment keyword scan.
-  const tier3Pages = allPages.filter((p) => isKeywordPage(p.text));
+  const tier3Pages = allPages.filter((p) => isKeywordPage(getPageText(p)));
   if (tier3Pages.length > 0) {
     return { pages: tier3Pages, tier: 3, format: "keyword" };
   }
@@ -338,7 +395,7 @@ function detectRelevantPages(allPages: PageText[]): Detection {
 
 function buildAnnotatedText(pageList: PageText[]) {
   return pageList
-    .map((p) => `[Page ${p.page}]\n${p.text.replace(/\s+/g, " ").trim()}`)
+    .map((p) => `[Page ${p.page}]\n${getPageText(p).replace(/\s+/g, " ").trim()}`)
     .join("\n\n")
     .slice(0, MAX_TEXT_CHARS);
 }
@@ -490,7 +547,7 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
 
   pages.sort((a, b) => a.page - b.page);
 
-  if (!pages.some((p) => p.text.trim())) {
+  if (!pages.some((p) => getPageText(p).trim())) {
     return NextResponse.json(
       { error: "No readable text found in that PDF." },
       { status: 422 }
@@ -507,14 +564,47 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
 
   const anthropic = new Anthropic({ apiKey });
 
+  // Debug: surface exactly what pdf-parse-fork returned and whether the legacy
+  // 5-digit patterns match, to diagnose detection misses. Runs on the raw
+  // pages before any trimming.
+  console.log("Sample page 1 text (first 200 chars):", getPageText(pages[0]).substring(0, 200));
+  console.log("Sample page 5 text (first 200 chars):", getPageText(pages[4]).substring(0, 200));
+  console.log("Total pages from pdf-parse-fork:", pages.length);
+  pages.slice(0, 10).forEach((page, i) => {
+    const text = getPageText(page);
+    console.log(`Page ${i + 1} - has SECTION pattern:`, /SECTION\s+\d{5}/i.test(text));
+    console.log(`Page ${i + 1} - has subsection pattern:`, /\d{5}\.\d{2}/.test(text));
+    console.log(`Page ${i + 1} - has footer pattern:`, /\d{5}\s*-\s*\d+/.test(text));
+    console.log(`Page ${i + 1} text preview:`, text.substring(0, 100));
+  });
+
+  // Hard appendix/transcript cutoff: from the first appendix signal onward
+  // (only ever after the last real spec page) the pages are meeting
+  // transcripts / contract forms, so drop them from ALL downstream processing —
+  // detection, the known-partner scan, and the Claude passes.
+  let workingPages = pages;
+  const cutoffIdx = findAppendixCutoff(pages);
+  if (cutoffIdx !== -1) {
+    const cutoffPage = pages[cutoffIdx].page;
+    const totalPages = pages.length;
+    console.log(
+      "Appendix cutoff detected at page:",
+      cutoffPage,
+      "— discarding remaining",
+      totalPages - cutoffPage,
+      "pages"
+    );
+    workingPages = pages.slice(0, cutoffIdx);
+  }
+
   // Pass 1 only ever looks at the front matter; Pass 2 looks at the pages the
   // tiered detector selects (see detectRelevantPages). Page numbers in both
   // passes refer to the original document throughout — neither pass renumbers
   // anything. Tier detection runs against a page set trimmed of trailing
   // appendices / end matter; the front-matter summary pass is unaffected.
-  const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
+  const frontMatterPages = workingPages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
 
-  const detectionPages = trimEndMatter(pages);
+  const detectionPages = trimEndMatter(workingPages);
   if (detectionPages.length !== pages.length) {
     console.log(
       "End-matter trim:",
@@ -548,7 +638,7 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
   const knownMatches: KnownMatch[] = [];
   for (const company of KNOWN_COMPANIES) {
     const matchedPages = relevantPages
-      .filter((p) => companyMatchesText(company, normalize(p.text)))
+      .filter((p) => companyMatchesText(company, normalize(getPageText(p))))
       .map((p) => p.page);
     if (matchedPages.length > 0) {
       knownMatches.push({ company, pages: matchedPages });
