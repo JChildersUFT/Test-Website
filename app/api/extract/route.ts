@@ -91,39 +91,19 @@ function namesOverlap(a: string, b: string) {
   );
 }
 
-// Division 46 (Water and Wastewater Equipment) section headers show up in a
-// lot of different forms across spec sheets — a running header with just
-// the bare number, "SECTION 46" with inconsistent spacing, "DIVISION 46",
-// or a section number that starts with 46 or 45. Deliberately loose: it's
-// far cheaper to include an extra page than to silently drop a real one.
-// Strict Division 46 (Water & Wastewater Equipment) detection. Requires a real
-// section number — "SECTION 46 0500" or a standalone 46-prefixed section number
-// in footer/subsection form ("460500" / "46 0500"). The generic word "SECTION"
-// or a bare "46" followed by loose digits must never match, since that fired on
-// procurement / contract pages ("Page 3 of 9", stray numbers).
+// Division 46 (Water & Wastewater Equipment) section-number detection. A page
+// matches on any of: a section header, a "46 xxxx" footer / cross-reference, a
+// space-stripped "46xxxx", or a "46 xxxx/N of M" page footer. The section
+// number alone is sufficient — no spec-heading confirmation is required.
 const DIVISION_46_PATTERNS = [
-  /SECTION\s+46\s*\d{4}/i, // header:            SECTION 46 0500
-  /\b46\d{4}\b/,           // footer/subsection: 460500
-  /\b46\s\d{4}\b/,         // footer/subsection: 46 0500
+  /SECTION\s+46\s+\d{4}/i,       // header:          SECTION 46 0526
+  /\b46\s+\d{4}/,               // footer / xref:   46 0526
+  /\b46\d{4}\b/,                // spaces stripped: 460526
+  /46\s*\d{4}\/\d+\s+of\s+\d+/i, // page footer:     46 0526/1 of 6
 ];
 
 function isDivision46Page(text: string) {
   return DIVISION_46_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-// CSI spec-section headings — used to confirm a Tier 1 match is a real spec
-// section. Procurement / contract pages that happen to trip a number pattern
-// won't carry these.
-const SPEC_HEADING_PATTERNS = [
-  /\bPART\s+1\b/i,
-  /\bPART\s+2\b/i,
-  /\bPRODUCTS\b/i,
-  /\bEXECUTION\b/i,
-  /\bGENERAL\b/i,
-];
-
-function hasSpecHeading(text: string) {
-  return SPEC_HEADING_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 // pdf-parse-fork hands us page objects, but defend against alternate shapes
@@ -253,17 +233,6 @@ function carryForward(allPages: PageText[], triggers: boolean[]): PageText[] {
   return [...included].sort((a, b) => a - b).map((i) => allPages[i]);
 }
 
-// True when a CSI spec heading appears on page `idx` or within `radius` pages of
-// it — used to confirm a Division 46 number match is real spec content.
-function hasSpecHeadingWithin(allPages: PageText[], idx: number, radius: number) {
-  const start = Math.max(0, idx - radius);
-  const end = Math.min(allPages.length - 1, idx + radius);
-  for (let j = start; j <= end; j++) {
-    if (hasSpecHeading(getPageText(allPages[j]))) return true;
-  }
-  return false;
-}
-
 // Legacy Division 11/13/15 selection mode: pre-2004 equipment sections numbered
 // 11xxx / 13xxx / 15xxx / 17xxx, via section headers, interior subsection refs,
 // and page-footer refs.
@@ -285,14 +254,9 @@ const KEYWORD_MODE_MIN = 2;
 function selectPagesForFormat(allPages: PageText[], format: SpecFormat): PageText[] {
   switch (format) {
     case "division46": {
-      // A 46-section match counts only when a CSI heading is on the page or
-      // within 3 pages; matched pages carry forward to capture manufacturer
-      // lists that spill onto following pages.
-      const triggers = allPages.map(
-        (p, i) =>
-          isDivision46Page(getPageText(p)) &&
-          hasSpecHeadingWithin(allPages, i, SECTION_LOOKAHEAD_PAGES)
-      );
+      // Any page carrying a Division 46 section number; matched pages carry
+      // forward to capture manufacturer lists on the following pages.
+      const triggers = allPages.map((p) => isDivision46Page(getPageText(p)));
       return carryForward(allPages, triggers);
     }
     case "legacy": {
