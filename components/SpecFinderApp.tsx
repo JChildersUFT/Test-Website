@@ -6,7 +6,14 @@ import UploadZone from "./UploadZone";
 import WaveDivider from "./WaveDivider";
 import ResultsSection from "./ResultsSection";
 import FeedbackSection from "./FeedbackSection";
-import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
+import SpecFormatSelector from "./SpecFormatSelector";
+import type {
+  AiDetected,
+  KnownMatch,
+  PageText,
+  ProjectSummary,
+  SpecFormat,
+} from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
 
@@ -23,10 +30,19 @@ export default function SpecFinderApp() {
   const [aiDetected, setAiDetected] = useState<AiDetected[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Selected format drives the next analysis; activeFormat is the one that
+  // produced the results currently on screen.
+  const [format, setFormat] = useState<SpecFormat>("division46");
+  const [activeFormat, setActiveFormat] = useState<SpecFormat>("division46");
+  // Full extracted pages, cached so a format change re-runs Pass 2 only.
+  const [extractedPages, setExtractedPages] = useState<PageText[] | null>(null);
+  const [reanalyzing, setReanalyzing] = useState(false);
+
   const handleFile = async (file: File) => {
     setStatus("loading");
     setFileName(file.name);
     setErrorMsg(null);
+    setExtractedPages(null);
 
     try {
       let res: Response;
@@ -34,6 +50,7 @@ export default function SpecFinderApp() {
       if (file.size < DIRECT_UPLOAD_LIMIT) {
         const formData = new FormData();
         formData.append("file", file);
+        formData.append("format", format);
         res = await fetch("/api/extract", {
           method: "POST",
           body: formData,
@@ -49,7 +66,7 @@ export default function SpecFinderApp() {
         res = await fetch("/api/extract", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ blobUrl: blob.url }),
+          body: JSON.stringify({ blobUrl: blob.url, format }),
         });
       }
 
@@ -62,6 +79,8 @@ export default function SpecFinderApp() {
       setSummary(data.summary ?? null);
       setKnownMatches(data.knownMatches ?? []);
       setAiDetected(data.aiDetected ?? []);
+      setExtractedPages(Array.isArray(data.pages) ? data.pages : null);
+      setActiveFormat(data.format ?? format);
       setStatus("done");
     } catch (err) {
       setErrorMsg(
@@ -70,6 +89,42 @@ export default function SpecFinderApp() {
       setStatus("error");
     }
   };
+
+  const reanalyze = async (nextFormat: SpecFormat, pages: PageText[]) => {
+    setReanalyzing(true);
+    setErrorMsg(null);
+    try {
+      const res = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pages, format: nextFormat }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Re-analysis failed. Please try again.");
+      }
+      setKnownMatches(data.knownMatches ?? []);
+      setAiDetected(data.aiDetected ?? []);
+      setActiveFormat(data.format ?? nextFormat);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : "Re-analysis failed. Please try again."
+      );
+    } finally {
+      setReanalyzing(false);
+    }
+  };
+
+  const handleFormatChange = (nextFormat: SpecFormat) => {
+    if (nextFormat === format) return;
+    setFormat(nextFormat);
+    // Re-run Pass 2 in place if we already have results + cached pages.
+    if (status === "done" && extractedPages) {
+      void reanalyze(nextFormat, extractedPages);
+    }
+  };
+
+  const selectorDisabled = status === "loading" || reanalyzing;
 
   return (
     <>
@@ -84,7 +139,15 @@ export default function SpecFinderApp() {
             partner list.
           </p>
 
-          <div className="mt-10">
+          <div className="mt-10 flex justify-center">
+            <SpecFormatSelector
+              value={format}
+              onChange={handleFormatChange}
+              disabled={selectorDisabled}
+            />
+          </div>
+
+          <div className="mt-8">
             <UploadZone status={status} fileName={fileName} onFile={handleFile} />
           </div>
         </div>
@@ -98,6 +161,9 @@ export default function SpecFinderApp() {
         knownMatches={knownMatches}
         aiDetected={aiDetected}
         errorMsg={errorMsg}
+        activeFormat={activeFormat}
+        reanalyzing={reanalyzing}
+        pendingFormat={format}
       />
 
       <FeedbackSection />

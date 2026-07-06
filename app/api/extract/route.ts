@@ -3,7 +3,13 @@ import pdfParse from "pdf-parse-fork";
 import Anthropic from "@anthropic-ai/sdk";
 import { del, get } from "@vercel/blob";
 import companiesData from "@/data/companies.json";
-import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
+import type {
+  AiDetected,
+  KnownMatch,
+  PageText,
+  ProjectSummary,
+  SpecFormat,
+} from "@/lib/types";
 
 export const runtime = "nodejs";
 // Large PDFs (50MB+) take longer to download from Blob, parse, and run two
@@ -120,12 +126,6 @@ function hasSpecHeading(text: string) {
   return SPEC_HEADING_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-// Minimum number of strict Division 46 matches (before carry-forward) required
-// for Tier 1 to count as a real hit rather than a handful of false positives.
-const MIN_TIER1_PAGES = 3;
-
-type PageText = { page: number; text: string };
-
 // pdf-parse-fork hands us page objects, but defend against alternate shapes
 // (a raw string, or a `content` field) so text access never silently yields
 // undefined. Our own pagerender always produces { page, text }.
@@ -140,49 +140,19 @@ function getPageText(page: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// Tiered page detection
+// Format-specific page selection
 //
-//   Tier 1  Division 46 (MasterFormat 2004+)         isDivision46Page
-//   Tier 2  alternate divisions + legacy 5-digit      isAlternateDivisionPage
-//                                                      / isLegacy5DigitPage
-//   Tier 3  process/equipment keyword scan            isKeywordPage
-//   Tier 4  full-document fallback
-//
-// Each tier is only consulted when every higher tier found nothing, so a
-// well-formed Division 46 document never reaches the looser tiers.
+// The spec format is chosen explicitly in the UI (see selectPagesForFormat) —
+// there is no auto-detection. The helpers below back the individual modes and
+// the appendix cutoff.
 // ---------------------------------------------------------------------------
 
-// Tier 2a — alternate MasterFormat 2004+ divisions that also carry water /
-// wastewater equipment: 15 (legacy mechanical), 11 (equipment), 13 (special
-// construction), 22 (plumbing), 43 (process gas & liquid handling). Mirrors the
-// deliberately-loose Division 46 approach: division/section headers plus
-// six-digit section numbers, space-optional.
-const ALTERNATE_DIVISION_PATTERNS = [
-  /division\s*1[135]/i,
-  /division\s*22/i,
-  /division\s*43/i,
-  /section\s*22/i,
-  /section\s*43/i,
-  // Six-digit (2004+) section numbers, space-optional. Deliberately not a bare
-  // "SECTION 11/13/15" word match — that collides with legacy 5-digit headers
-  // ("SECTION 11044", "SECTION 11"), which the Tier 2b legacy detector owns so
-  // they get the correct MasterFormat-legacy-5digit label.
-  /\b1[135]\s*\d{4}\b/,
-  /\b22\s*\d{4}\b/,
-  /\b43\s*\d{4}\b/,
-];
-
-function isAlternateDivisionPage(text: string) {
-  return ALTERNATE_DIVISION_PATTERNS.some((pattern) => pattern.test(text));
-}
-
-// Tier 2b — old MasterFormat 5-digit flat numbering used by pre-2004 and many
-// state-agency specs. Interior pages rarely repeat the "SECTION 11226" header,
-// so we detect all three ways a legacy section number appears: the header, an
-// interior subsection reference (11226.03), and a page footer (11226 - 2). Each
-// pattern captures the bare 5-digit number so we can confirm it falls in one of
-// the legacy water/wastewater divisions before flagging the page. No keyword
-// co-occurrence is required — that check was excluding valid manufacturer pages.
+// Broad legacy MasterFormat (pre-2004) 5-digit detection covering divisions
+// 02/11/13/15/17/26. This is the wide "is there real spec content here" check
+// used by the appendix cutoff — deliberately broader than the narrow Division
+// 11/13/15 selection mode. All three ways a legacy section number appears are
+// recognized (header, interior subsection ref 11226.03, page footer 11226 - 2)
+// and each is range-checked against a legacy division.
 const LEGACY_5DIGIT_PATTERNS = [
   /\bSECTION\s+(\d{5})\b/gi, // header:      SECTION 11226
   /\b(\d{5})\.\d{2}\b/g,     // subsection:  11226.03
@@ -231,12 +201,8 @@ const PROCESS_KEYWORDS = [
   "treatment",
 ];
 
-// Tier 3 — keyword scan. No keyword list existed before this change, so the
-// base is seeded from the Tier 2 process/equipment keywords and extended with
-// the broader water/wastewater spec vocabulary below. A page qualifies when it
-// contains at least TIER3_MIN_KEYWORDS of these terms.
-const TIER3_MIN_KEYWORDS = 1;
-
+// Keyword-scan vocabulary: process/equipment terms plus broader water /
+// wastewater spec words. Used by the "Keyword scan" format mode.
 const TIER3_KEYWORDS = [
   ...PROCESS_KEYWORDS,
   "water treatment",
@@ -260,16 +226,13 @@ const TIER3_KEYWORDS = [
   "basis of design",
 ];
 
-function isKeywordPage(text: string) {
+function keywordMatchCount(text: string) {
   const lower = text.toLowerCase();
   let hits = 0;
   for (const keyword of TIER3_KEYWORDS) {
-    if (lower.includes(keyword)) {
-      hits += 1;
-      if (hits >= TIER3_MIN_KEYWORDS) return true;
-    }
+    if (lower.includes(keyword)) hits += 1;
   }
-  return false;
+  return hits;
 }
 
 // PDF text is extracted one page at a time, so a section header often lands on
@@ -278,54 +241,72 @@ function isKeywordPage(text: string) {
 // lists that spill across page breaks are captured.
 const SECTION_LOOKAHEAD_PAGES = 3;
 
-function selectWithCarryForward(
-  allPages: PageText[],
-  isTrigger: (page: PageText) => boolean
-): PageText[] {
+// Given a per-index trigger flag, return every triggered page plus the next
+// SECTION_LOOKAHEAD_PAGES pages after it, de-duplicated and in document order.
+function carryForward(allPages: PageText[], triggers: boolean[]): PageText[] {
   const included = new Set<number>();
   for (let i = 0; i < allPages.length; i++) {
-    if (!isTrigger(allPages[i])) continue;
+    if (!triggers[i]) continue;
     const end = Math.min(i + SECTION_LOOKAHEAD_PAGES, allPages.length - 1);
     for (let j = i; j <= end; j++) included.add(j);
   }
   return [...included].sort((a, b) => a - b).map((i) => allPages[i]);
 }
 
-// Documents almost always end with appendices, general conditions, insurance,
-// and contract forms that generate false positives without adding manufacturer
-// data. Trim to the last page carrying a real spec section (plus a small buffer
-// for lists that spill past the final header), and never process the final
-// HARD_TAIL_PAGES unless a spec section actually appears within them.
-const END_MATTER_BUFFER_PAGES = 5;
-const HARD_TAIL_PAGES = 50;
+// True when a CSI spec heading appears on page `idx` or within `radius` pages of
+// it — used to confirm a Division 46 number match is real spec content.
+function hasSpecHeadingWithin(allPages: PageText[], idx: number, radius: number) {
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(allPages.length - 1, idx + radius);
+  for (let j = start; j <= end; j++) {
+    if (hasSpecHeading(getPageText(allPages[j]))) return true;
+  }
+  return false;
+}
 
-function trimEndMatter(allPages: PageText[]): PageText[] {
-  const n = allPages.length;
-  if (n === 0) return allPages;
+// Legacy Division 11/13/15 selection mode: pre-2004 equipment sections numbered
+// 11xxx / 13xxx / 15xxx / 17xxx, via section headers, interior subsection refs,
+// and page-footer refs.
+const LEGACY_MODE_PATTERNS = [
+  /SECTION\s+1[1357]\d{3}/i,    // header:      SECTION 11226
+  /\b1[1357]\d{3}\.\d{2}\b/,    // subsection:  11226.03
+  /\b1[1357]\d{3}\s*-\s*\d+\b/, // page footer: 11226 - 2
+];
 
-  // Scan from the end for the last page with a real spec section pattern.
-  let lastSpecIdx = -1;
-  for (let i = n - 1; i >= 0; i--) {
-    if (isSpecSectionPage(getPageText(allPages[i]))) {
-      lastSpecIdx = i;
-      break;
+function isLegacyModePage(text: string) {
+  return LEGACY_MODE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+// Minimum distinct keyword hits for the keyword-scan mode to include a page.
+const KEYWORD_MODE_MIN = 2;
+
+// Selects the pages fed to Pass 2 based on the user-chosen spec format. The
+// appendix cutoff has already been applied by the caller.
+function selectPagesForFormat(allPages: PageText[], format: SpecFormat): PageText[] {
+  switch (format) {
+    case "division46": {
+      // A 46-section match counts only when a CSI heading is on the page or
+      // within 3 pages; matched pages carry forward to capture manufacturer
+      // lists that spill onto following pages.
+      const triggers = allPages.map(
+        (p, i) =>
+          isDivision46Page(getPageText(p)) &&
+          hasSpecHeadingWithin(allPages, i, SECTION_LOOKAHEAD_PAGES)
+      );
+      return carryForward(allPages, triggers);
     }
+    case "legacy": {
+      const triggers = allPages.map((p) => isLegacyModePage(getPageText(p)));
+      return carryForward(allPages, triggers);
+    }
+    case "keyword":
+      return allPages.filter(
+        (p) => keywordMatchCount(getPageText(p)) >= KEYWORD_MODE_MIN
+      );
+    case "full":
+    default:
+      return allPages;
   }
-
-  // No real spec content anywhere — don't trim; let tier detection decide.
-  if (lastSpecIdx === -1) return allPages;
-
-  let cutoff = lastSpecIdx + END_MATTER_BUFFER_PAGES;
-
-  // Hard cutoff: when the last real spec page is before the final
-  // HARD_TAIL_PAGES, no spec appears in that tail, so drop it entirely (buffer
-  // included) rather than letting the buffer spill into the appendices.
-  if (lastSpecIdx < n - HARD_TAIL_PAGES) {
-    cutoff = Math.min(cutoff, n - HARD_TAIL_PAGES - 1);
-  }
-
-  cutoff = Math.min(cutoff, n - 1);
-  return allPages.slice(0, cutoff + 1);
 }
 
 const APPENDIX_SCAN_WINDOW = 150;
@@ -372,55 +353,12 @@ function findAppendixCutoff(allPages: PageText[]): number {
   return -1;
 }
 
-type Detection = { pages: PageText[]; tier: number; format: string };
-
-// Walks the tiers in order and returns the first non-empty selection, falling
-// back to the full document. Preserves the original per-tier log lines.
-function detectRelevantPages(allPages: PageText[]): Detection {
-  // Tier 1 — strict Division 46 (MasterFormat 2004+). A match only counts when
-  // at least MIN_TIER1_PAGES pages hit the strict pattern AND at least one of
-  // them carries a CSI spec heading (PART 1/2, PRODUCTS, EXECUTION, GENERAL);
-  // otherwise a few false number matches on procurement pages would masquerade
-  // as a Division 46 document. Carry-forward is applied only after that passes.
-  const tier1Triggers = allPages.filter((p) => isDivision46Page(getPageText(p)));
-  console.log("Division 46 pages found:", tier1Triggers.length, "of", allPages.length);
-  const tier1HasSpecHeading = tier1Triggers.some((p) => hasSpecHeading(getPageText(p)));
-  if (tier1Triggers.length >= MIN_TIER1_PAGES && tier1HasSpecHeading) {
-    const tier1Pages = selectWithCarryForward(allPages, (p) => isDivision46Page(getPageText(p)));
-    return { pages: tier1Pages, tier: 1, format: "MasterFormat-2004+" };
-  }
-  if (tier1Triggers.length > 0) {
-    console.log(
-      "Tier 1 rejected —",
-      tier1Triggers.length,
-      "trigger page(s), spec heading present:",
-      tier1HasSpecHeading,
-      "— falling through to Tier 2"
-    );
-  }
-
-  // Tier 2 — alternate divisions (modern six-digit) and legacy 5-digit flat
-  // numbering. A modern alternate-division match keeps the 2004+ format label;
-  // otherwise the selection came from the legacy numbering.
-  const modernPages = allPages.filter((p) => isAlternateDivisionPage(getPageText(p)));
-  const legacyPages = selectWithCarryForward(allPages, (p) => isLegacy5DigitPage(getPageText(p)));
-  if (modernPages.length > 0 || legacyPages.length > 0) {
-    const wanted = new Set([...modernPages, ...legacyPages].map((p) => p.page));
-    const tier2Pages = allPages.filter((p) => wanted.has(p.page));
-    const format =
-      modernPages.length > 0 ? "MasterFormat-2004+" : "MasterFormat-legacy-5digit";
-    return { pages: tier2Pages, tier: 2, format };
-  }
-
-  // Tier 3 — process/equipment keyword scan.
-  const tier3Pages = allPages.filter((p) => isKeywordPage(getPageText(p)));
-  if (tier3Pages.length > 0) {
-    return { pages: tier3Pages, tier: 3, format: "keyword" };
-  }
-
-  // Tier 4 — full-document fallback (unchanged behavior).
-  console.warn("No Division 46 pages detected — falling back to full document");
-  return { pages: allPages, tier: 4, format: "full-document" };
+// Coerce an untrusted request value to a valid SpecFormat, defaulting to
+// Division 46 (the UI default).
+function parseFormat(value: unknown): SpecFormat {
+  return value === "legacy" || value === "keyword" || value === "full"
+    ? value
+    : "division46";
 }
 
 function buildAnnotatedText(pageList: PageText[]) {
@@ -465,13 +403,21 @@ export async function POST(req: NextRequest) {
 
   let bytes: Uint8Array;
   let blobUrl: string | null = null;
+  let format: SpecFormat = "division46";
 
   if (contentType.includes("application/json")) {
-    let body: { blobUrl?: unknown };
+    let body: { blobUrl?: unknown; pages?: unknown; format?: unknown };
     try {
       body = await req.json();
     } catch {
       return NextResponse.json({ error: "Invalid upload." }, { status: 400 });
+    }
+    format = parseFormat(body.format);
+
+    // Re-analysis: the client sends back the pages it already extracted so we
+    // re-run only Pass 2 with a new format, without re-parsing the PDF.
+    if (Array.isArray(body.pages)) {
+      return await reanalyze(body.pages, format);
     }
 
     if (typeof body.blobUrl !== "string" || !body.blobUrl) {
@@ -511,6 +457,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid upload." }, { status: 400 });
     }
 
+    format = parseFormat(formData.get("format"));
+
     const file = formData.get("file");
     if (!(file instanceof File)) {
       return NextResponse.json(
@@ -529,7 +477,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    return await extractFromBytes(bytes);
+    return await extractFromBytes(bytes, format);
   } finally {
     if (blobUrl) {
       try {
@@ -541,7 +489,10 @@ export async function POST(req: NextRequest) {
   }
 }
 
-async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
+async function extractFromBytes(
+  bytes: Uint8Array,
+  format: SpecFormat
+): Promise<NextResponse> {
   const pages: PageText[] = [];
 
   try {
@@ -619,59 +570,90 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     console.log(`Page ${pageNum} preview:`, text.substring(0, 150));
   });
 
-  // Hard appendix/transcript cutoff: from the first appendix signal onward
-  // (only ever after the last real spec page) the pages are meeting
-  // transcripts / contract forms, so drop them from ALL downstream processing —
-  // detection, the known-partner scan, and the Claude passes.
-  let workingPages = pages;
-  const cutoffIdx = findAppendixCutoff(pages);
+  // Pass 1 (summary) always looks at the front matter and is independent of the
+  // chosen format. Pass 2 filters by format and runs the company pass. Both run
+  // in parallel. Page numbers refer to the original document throughout.
+  const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
+
+  const [summary, pass2] = await Promise.all([
+    runSummaryPass(anthropic, frontMatterPages),
+    runPass2(anthropic, pages, format),
+  ]);
+
+  // Return the full extracted pages so the client can re-run Pass 2 with a
+  // different format without re-uploading / re-parsing the PDF.
+  return NextResponse.json({ summary, ...pass2, pages, format });
+}
+
+// Re-run only Pass 2 against pages the client already extracted, for a format
+// change. Skips PDF parsing and the summary pass entirely.
+async function reanalyze(
+  rawPages: unknown[],
+  format: SpecFormat
+): Promise<NextResponse> {
+  const pages: PageText[] = rawPages
+    .map((p) => {
+      const record = p as { page?: unknown };
+      return {
+        page: typeof record?.page === "number" ? record.page : 0,
+        text: getPageText(p),
+      };
+    })
+    .filter((p) => p.text.length > 0);
+
+  if (pages.length === 0) {
+    return NextResponse.json(
+      { error: "No page text provided for re-analysis." },
+      { status: 400 }
+    );
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: "Server is missing the ANTHROPIC_API_KEY environment variable." },
+      { status: 500 }
+    );
+  }
+  const anthropic = new Anthropic({ apiKey });
+
+  const pass2 = await runPass2(anthropic, pages, format);
+  return NextResponse.json({ ...pass2, format });
+}
+
+// Pass 2: apply the appendix cutoff (all modes), select pages for the chosen
+// format, run the company pass, and reconcile against the known-partner list.
+async function runPass2(
+  anthropic: Anthropic,
+  allPages: PageText[],
+  format: SpecFormat
+): Promise<{ knownMatches: KnownMatch[]; aiDetected: AiDetected[] }> {
+  // Hard appendix/transcript cutoff — runs for every format.
+  let workingPages = allPages;
+  const cutoffIdx = findAppendixCutoff(allPages);
   if (cutoffIdx !== -1) {
-    const cutoffPage = pages[cutoffIdx].page;
-    const totalPages = pages.length;
+    const cutoffPage = allPages[cutoffIdx].page;
     console.log(
       "Appendix cutoff detected at page:",
       cutoffPage,
       "— discarding remaining",
-      totalPages - cutoffPage,
+      allPages.length - cutoffPage,
       "pages"
     );
-    workingPages = pages.slice(0, cutoffIdx);
+    workingPages = allPages.slice(0, cutoffIdx);
   }
 
-  // Pass 1 only ever looks at the front matter; Pass 2 looks at the pages the
-  // tiered detector selects (see detectRelevantPages). Page numbers in both
-  // passes refer to the original document throughout — neither pass renumbers
-  // anything. Tier detection runs against a page set trimmed of trailing
-  // appendices / end matter; the front-matter summary pass is unaffected.
-  const frontMatterPages = workingPages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
-
-  const detectionPages = trimEndMatter(workingPages);
-  if (detectionPages.length !== pages.length) {
-    console.log(
-      "End-matter trim:",
-      pages.length,
-      "->",
-      detectionPages.length,
-      "pages for detection"
-    );
-  }
-
-  const { pages: relevantPages, tier, format } = detectRelevantPages(detectionPages);
+  const relevantPages = selectPagesForFormat(workingPages, format);
   console.log(
-    "Detection tier:",
-    tier,
-    "| Format:",
+    "Format:",
     format,
-    "| Pages:",
+    "| Pages selected:",
     relevantPages.length,
     "of",
-    detectionPages.length
+    workingPages.length
   );
 
-  const [summary, aiCompanies] = await Promise.all([
-    runSummaryPass(anthropic, frontMatterPages),
-    runCompanyPass(anthropic, relevantPages),
-  ]);
+  const aiCompanies = await runCompanyPass(anthropic, relevantPages);
 
   // PDF extraction can introduce irregular whitespace (runs of spaces from
   // justified text, newlines at line-wrap points) that splits up phrases
@@ -732,7 +714,7 @@ async function extractFromBytes(bytes: Uint8Array): Promise<NextResponse> {
     });
   }
 
-  return NextResponse.json({ summary, knownMatches, aiDetected });
+  return { knownMatches, aiDetected };
 }
 
 async function runSummaryPass(

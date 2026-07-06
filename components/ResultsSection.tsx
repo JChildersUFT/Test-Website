@@ -1,7 +1,13 @@
 import CompanyCard from "./CompanyCard";
 import SummaryCard from "./SummaryCard";
 import DownloadResultsButton from "./DownloadResultsButton";
-import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
+import {
+  SPEC_FORMAT_LABELS,
+  type AiDetected,
+  type KnownMatch,
+  type ProjectSummary,
+  type SpecFormat,
+} from "@/lib/types";
 
 type Status = "idle" | "loading" | "error" | "done";
 
@@ -11,6 +17,9 @@ type Props = {
   knownMatches: KnownMatch[];
   aiDetected: AiDetected[];
   errorMsg: string | null;
+  activeFormat: SpecFormat;
+  reanalyzing: boolean;
+  pendingFormat: SpecFormat;
 };
 
 export default function ResultsSection({
@@ -19,6 +28,9 @@ export default function ResultsSection({
   knownMatches,
   aiDetected,
   errorMsg,
+  activeFormat,
+  reanalyzing,
+  pendingFormat,
 }: Props) {
   return (
     <section className="w-full bg-surface">
@@ -43,6 +55,24 @@ export default function ResultsSection({
 
         {status === "done" && (
           <div className="flex flex-col gap-10">
+            {reanalyzing && (
+              <p
+                className="rounded-lg bg-light-teal px-4 py-3 text-center text-sm font-medium text-teal"
+                role="status"
+              >
+                Re-analyzing with {SPEC_FORMAT_LABELS[pendingFormat]}…
+              </p>
+            )}
+
+            {!reanalyzing && errorMsg && (
+              <p
+                className="rounded-lg bg-red-50 px-4 py-3 text-center text-sm font-medium text-red-600"
+                role="status"
+              >
+                {errorMsg}
+              </p>
+            )}
+
             <div className="flex items-center justify-between gap-4">
               <p className="text-sm text-secondary">
                 Analysis complete. Download a copy for your records.
@@ -55,6 +85,10 @@ export default function ResultsSection({
             </div>
 
             {summary && <SummaryCard summary={summary} />}
+
+            <p className="-mt-6 text-xs text-secondary">
+              Analyzed using: {SPEC_FORMAT_LABELS[activeFormat]}
+            </p>
 
             <div>
               <h2 className="mb-1 text-lg font-semibold text-navy">
