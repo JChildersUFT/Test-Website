@@ -91,15 +91,17 @@ function namesOverlap(a: string, b: string) {
   );
 }
 
-// Division 46 (Water & Wastewater Equipment) section-number detection. A page
-// matches on any of: a section header, a "46 xxxx" footer / cross-reference, a
-// space-stripped "46xxxx", or a "46 xxxx/N of M" page footer. The section
-// number alone is sufficient — no spec-heading confirmation is required.
+// Division 46 (Water & Wastewater Equipment) plus the closely related Division
+// 43 (Process Gas & Liquid Handling) — both carry water/wastewater process
+// equipment, so the Division 46 mode looks for either. A page matches on any of:
+// a section header, a "NN xxxx" footer / cross-reference, a space-stripped
+// "NNxxxx", or a "NN xxxx/N of M" page footer. The section number alone is
+// sufficient — no spec-heading confirmation is required.
 const DIVISION_46_PATTERNS = [
-  /SECTION\s+46\s+\d{4}/i,       // header:          SECTION 46 0526
-  /\b46\s+\d{4}/,               // footer / xref:   46 0526
-  /\b46\d{4}\b/,                // spaces stripped: 460526
-  /46\s*\d{4}\/\d+\s+of\s+\d+/i, // page footer:     46 0526/1 of 6
+  /SECTION\s+4[63]\s+\d{4}/i,       // header:          SECTION 46 0526 / 43 0526
+  /\b4[63]\s+\d{4}/,               // footer / xref:   46 0526 / 43 0526
+  /\b4[63]\d{4}\b/,                // spaces stripped: 460526 / 430526
+  /4[63]\s*\d{4}\/\d+\s+of\s+\d+/i, // page footer:     46 0526/1 of 6
 ];
 
 function isDivision46Page(text: string) {

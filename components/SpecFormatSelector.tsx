@@ -13,7 +13,7 @@ const OPTIONS: { value: SpecFormat; label: string; description: string }[] = [
     value: "division46",
     label: "Division 46",
     description:
-      "New MasterFormat (post-2004) — wastewater/water treatment sections numbered 46 xxxx.",
+      "New MasterFormat (post-2004) — wastewater/water treatment sections numbered 46 xxxx (and related Division 43).",
   },
   {
     value: "legacy",
