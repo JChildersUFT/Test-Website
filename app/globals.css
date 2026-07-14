@@ -24,3 +24,29 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
+
+/* Flowing-water animation for the wave dividers. Each wave path tiles every
+   1440 user units, so translating by -1440px loops seamlessly. */
+@keyframes wave-flow {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-1440px, 0, 0);
+  }
+}
+
+.wave-flow-slow {
+  animation: wave-flow 18s linear infinite;
+}
+
+.wave-flow-fast {
+  animation: wave-flow 11s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave-flow-slow,
+  .wave-flow-fast {
+    animation: none;
+  }
+}

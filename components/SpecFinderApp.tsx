@@ -171,7 +171,11 @@ export default function SpecFinderApp() {
         pendingFormat={format}
       />
 
+      <WaveDivider className="bg-surface" />
+
       <FeedbackSection />
+
+      <WaveDivider className="bg-white" />
     </>
   );
 }
