@@ -3,7 +3,22 @@ type Props = {
   pages: number[];
   specSection?: string;
   products?: string;
-  variant: "known" | "ai";
+  variant: "known" | "ai" | "product";
+};
+
+const CARD_STYLES: Record<Props["variant"], { card: string; name: string }> = {
+  known: {
+    card: "rounded-xl border border-teal/30 bg-teal/10 p-4",
+    name: "text-sm font-semibold text-teal",
+  },
+  ai: {
+    card: "rounded-xl border border-primary/30 bg-light-blue p-4",
+    name: "text-sm font-semibold text-primary",
+  },
+  product: {
+    card: "rounded-xl border border-[#6366F1]/30 bg-[#6366F1]/10 p-4",
+    name: "text-sm font-semibold text-[#6366F1]",
+  },
 };
 
 function formatSpecSection(section: string) {
@@ -22,15 +37,10 @@ export default function CompanyCard({
   variant,
 }: Props) {
   const isKnown = variant === "known";
+  const styles = CARD_STYLES[variant];
 
   return (
-    <div
-      className={
-        isKnown
-          ? "rounded-xl border border-teal/30 bg-teal/10 p-4"
-          : "rounded-xl border border-primary/30 bg-light-blue p-4"
-      }
-    >
+    <div className={styles.card}>
       <div className="flex items-start gap-1.5">
         {isKnown && (
           <svg
@@ -50,15 +60,7 @@ export default function CompanyCard({
             />
           </svg>
         )}
-        <span
-          className={
-            isKnown
-              ? "text-sm font-semibold text-teal"
-              : "text-sm font-semibold text-primary"
-          }
-        >
-          {company}
-        </span>
+        <span className={styles.name}>{company}</span>
       </div>
 
       {pages.length > 0 && (

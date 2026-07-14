@@ -5,6 +5,7 @@ import {
   SPEC_FORMAT_LABELS,
   type AiDetected,
   type KnownMatch,
+  type ProductMatch,
   type ProjectSummary,
   type SpecFormat,
 } from "@/lib/types";
@@ -16,6 +17,7 @@ type Props = {
   summary: ProjectSummary | null;
   knownMatches: KnownMatch[];
   aiDetected: AiDetected[];
+  products: ProductMatch[];
   errorMsg: string | null;
   activeFormat: SpecFormat;
   reanalyzing: boolean;
@@ -27,6 +29,7 @@ export default function ResultsSection({
   summary,
   knownMatches,
   aiDetected,
+  products,
   errorMsg,
   activeFormat,
   reanalyzing,
@@ -81,6 +84,7 @@ export default function ResultsSection({
                 summary={summary}
                 knownMatches={knownMatches}
                 aiDetected={aiDetected}
+                products={products}
               />
             </div>
 
@@ -141,6 +145,34 @@ export default function ResultsSection({
               ) : (
                 <p className="text-sm text-secondary">
                   No additional companies were detected.
+                </p>
+              )}
+            </div>
+
+            <div className="rounded-2xl bg-[#F5F3FF] p-6 sm:p-8">
+              <h2 className="mb-1 text-lg font-semibold text-navy">
+                Product Mentions{" "}
+                <span className="text-[#6366F1]">
+                  ({products.length} found)
+                </span>
+              </h2>
+              <p className="mb-4 text-sm text-secondary">
+                Products and equipment types found anywhere in this document.
+              </p>
+              {products.length > 0 ? (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {products.map((m) => (
+                    <CompanyCard
+                      key={m.product}
+                      company={m.product}
+                      pages={m.pages}
+                      variant="product"
+                    />
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-secondary">
+                  No tracked product types were found in this document.
                 </p>
               )}
             </div>

@@ -3,10 +3,12 @@ import pdfParse from "pdf-parse-fork";
 import Anthropic from "@anthropic-ai/sdk";
 import { del, get } from "@vercel/blob";
 import companiesData from "@/data/companies.json";
+import productsData from "@/data/products.json";
 import type {
   AiDetected,
   KnownMatch,
   PageText,
+  ProductMatch,
   ProjectSummary,
   SpecFormat,
 } from "@/lib/types";
@@ -119,6 +121,62 @@ function getPageText(page: unknown): string {
     if (typeof record.content === "string") return record.content;
   }
   return "";
+}
+
+// ---------------------------------------------------------------------------
+// Product / equipment keyword search
+//
+// Runs across EVERY page of the document (not the format-filtered set), since
+// products can be referenced anywhere. Matching, per term:
+//   - multi-word terms  -> case-insensitive substring
+//   - short abbreviations (DAF, MBR, …) -> whole-word \bX\b so they don't fire
+//     inside other words
+//   - other single words -> a leading word boundary (\bTerm) so inflections
+//     like "composting"/"clarifiers" still match but mid-word hits
+//     ("remediation" for "Media", "dechlorination" for "Chlorination") do not
+// ---------------------------------------------------------------------------
+const PRODUCT_TERMS = productsData as string[];
+
+const PRODUCT_ABBREVIATIONS = new Set([
+  "DAF",
+  "MBR",
+  "SBR",
+  "RBC",
+  "VFD",
+  "FRP",
+  "MBBR",
+  "SCADA",
+  "ORP",
+]);
+
+const PRODUCT_MATCHERS: { product: string; test: (text: string) => boolean }[] =
+  PRODUCT_TERMS.map((term) => {
+    if (/\s/.test(term)) {
+      const needle = term.toLowerCase();
+      return { product: term, test: (t: string) => t.toLowerCase().includes(needle) };
+    }
+    if (PRODUCT_ABBREVIATIONS.has(term)) {
+      const re = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i");
+      return { product: term, test: (t: string) => re.test(t) };
+    }
+    const re = new RegExp(`\\b${escapeRegExp(term)}`, "i");
+    return { product: term, test: (t: string) => re.test(t) };
+  });
+
+function findProductMentions(allPages: PageText[]): ProductMatch[] {
+  const results: ProductMatch[] = [];
+  for (const { product, test } of PRODUCT_MATCHERS) {
+    const pages: number[] = [];
+    for (const p of allPages) {
+      if (test(getPageText(p))) pages.push(p.page);
+    }
+    if (pages.length > 0) {
+      results.push({ product, pages: [...new Set(pages)].sort((a, b) => a - b) });
+    }
+  }
+  // Sort by first page number ascending.
+  results.sort((a, b) => a.pages[0] - b.pages[0]);
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +599,9 @@ async function extractFromBytes(
   // in parallel. Page numbers refer to the original document throughout.
   const frontMatterPages = pages.filter((p) => p.page <= FRONT_MATTER_PAGE_LIMIT);
 
+  // The product keyword search runs over every page, independent of format.
+  const products = findProductMentions(pages);
+
   const [summary, pass2] = await Promise.all([
     runSummaryPass(anthropic, frontMatterPages),
     runPass2(anthropic, pages, format),
@@ -548,7 +609,7 @@ async function extractFromBytes(
 
   // Return the full extracted pages so the client can re-run Pass 2 with a
   // different format without re-uploading / re-parsing the PDF.
-  return NextResponse.json({ summary, ...pass2, pages, format });
+  return NextResponse.json({ summary, ...pass2, products, pages, format });
 }
 
 // Re-run only Pass 2 against pages the client already extracted, for a format
@@ -583,8 +644,9 @@ async function reanalyze(
   }
   const anthropic = new Anthropic({ apiKey });
 
+  const products = findProductMentions(pages);
   const pass2 = await runPass2(anthropic, pages, format);
-  return NextResponse.json({ ...pass2, format });
+  return NextResponse.json({ ...pass2, products, format });
 }
 
 // Pass 2: apply the appendix cutoff (all modes), select pages for the chosen

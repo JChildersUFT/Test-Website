@@ -1,10 +1,16 @@
 import type { jsPDF } from "jspdf";
 import type { autoTable as AutoTableFn } from "jspdf-autotable";
-import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
+import type {
+  AiDetected,
+  KnownMatch,
+  ProductMatch,
+  ProjectSummary,
+} from "@/lib/types";
 
 // UFT brand palette, as [r, g, b] tuples for jsPDF.
 const BLUE: [number, number, number] = [21, 101, 192]; // #1565C0
 const TEAL: [number, number, number] = [15, 157, 140]; // #0F9D8C
+const INDIGO: [number, number, number] = [99, 102, 241]; // #6366F1
 const NAVY: [number, number, number] = [14, 42, 71]; // #0E2A47
 const MUTED: [number, number, number] = [91, 107, 122]; // #5B6B7A
 const WHITE: [number, number, number] = [255, 255, 255];
@@ -59,8 +65,9 @@ export async function generateResultsPdf(params: {
   summary: ProjectSummary | null;
   knownMatches: KnownMatch[];
   aiDetected: AiDetected[];
+  products: ProductMatch[];
 }): Promise<void> {
-  const { summary, knownMatches, aiDetected } = params;
+  const { summary, knownMatches, aiDetected, products } = params;
 
   // Loaded on demand so jsPDF stays out of the initial page bundle.
   const { jsPDF } = await import("jspdf");
@@ -121,7 +128,7 @@ export async function generateResultsPdf(params: {
 
   cursorY += 26;
 
-  renderCompanyTable(doc, autoTable, {
+  cursorY = renderCompanyTable(doc, autoTable, {
     title: "AI-Detected Companies",
     headColor: TEAL,
     companies: aiDetected,
@@ -129,6 +136,10 @@ export async function generateResultsPdf(params: {
     startY: cursorY,
     contentWidth,
   });
+
+  cursorY += 26;
+
+  renderProductTable(doc, autoTable, { products, startY: cursorY, contentWidth });
 
   // Footer note on every page
   const pageCount = doc.getNumberOfPages();
@@ -198,6 +209,48 @@ function renderCompanyTable(
       c.products ?? "—",
       formatPages(c.pages),
     ]),
+  });
+
+  return doc.lastAutoTable?.finalY ?? tableY;
+}
+
+function renderProductTable(
+  doc: AutoTableDoc,
+  autoTable: typeof AutoTableFn,
+  opts: { products: ProductMatch[]; startY: number; contentWidth: number }
+): number {
+  const { products, startY, contentWidth } = opts;
+
+  doc.setTextColor(...NAVY);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(13);
+  doc.text(`Product Mentions (${products.length} found)`, MARGIN, startY);
+  const tableY = startY + 8;
+
+  if (products.length === 0) {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.setTextColor(...MUTED);
+    doc.text(
+      "No tracked product types were found in this document.",
+      MARGIN,
+      tableY + 12
+    );
+    return tableY + 18;
+  }
+
+  autoTable(doc, {
+    startY: tableY,
+    margin: { left: MARGIN, right: MARGIN },
+    tableWidth: contentWidth,
+    theme: "grid",
+    headStyles: { fillColor: INDIGO, textColor: [255, 255, 255], fontStyle: "bold", fontSize: 9 },
+    styles: { fontSize: 9, cellPadding: 5, textColor: NAVY, lineColor: [227, 242, 253], overflow: "linebreak" },
+    columnStyles: {
+      0: { cellWidth: 220, fontStyle: "bold" },
+    },
+    head: [["Product", "Pages"]],
+    body: products.map((p) => [p.product, formatPages(p.pages)]),
   });
 
   return doc.lastAutoTable?.finalY ?? tableY;

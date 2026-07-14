@@ -30,6 +30,13 @@ export interface PageText {
   text: string;
 }
 
+// A tracked product/equipment type found somewhere in the document, with the
+// pages it was mentioned on.
+export interface ProductMatch {
+  product: string;
+  pages: number[];
+}
+
 // Which section-filtering strategy Pass 2 uses. Chosen explicitly in the UI —
 // there is no auto-detection.
 export type SpecFormat = "division46" | "legacy" | "keyword" | "full";

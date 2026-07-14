@@ -11,6 +11,7 @@ import type {
   AiDetected,
   KnownMatch,
   PageText,
+  ProductMatch,
   ProjectSummary,
   SpecFormat,
 } from "@/lib/types";
@@ -28,6 +29,7 @@ export default function SpecFinderApp() {
   const [summary, setSummary] = useState<ProjectSummary | null>(null);
   const [knownMatches, setKnownMatches] = useState<KnownMatch[]>([]);
   const [aiDetected, setAiDetected] = useState<AiDetected[]>([]);
+  const [products, setProducts] = useState<ProductMatch[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Selected format drives the next analysis; activeFormat is the one that
@@ -79,6 +81,7 @@ export default function SpecFinderApp() {
       setSummary(data.summary ?? null);
       setKnownMatches(data.knownMatches ?? []);
       setAiDetected(data.aiDetected ?? []);
+      setProducts(data.products ?? []);
       setExtractedPages(Array.isArray(data.pages) ? data.pages : null);
       setActiveFormat(data.format ?? format);
       setStatus("done");
@@ -105,6 +108,7 @@ export default function SpecFinderApp() {
       }
       setKnownMatches(data.knownMatches ?? []);
       setAiDetected(data.aiDetected ?? []);
+      if (Array.isArray(data.products)) setProducts(data.products);
       setActiveFormat(data.format ?? nextFormat);
     } catch (err) {
       setErrorMsg(
@@ -160,6 +164,7 @@ export default function SpecFinderApp() {
         summary={summary}
         knownMatches={knownMatches}
         aiDetected={aiDetected}
+        products={products}
         errorMsg={errorMsg}
         activeFormat={activeFormat}
         reanalyzing={reanalyzing}

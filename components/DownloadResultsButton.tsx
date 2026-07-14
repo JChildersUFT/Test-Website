@@ -2,18 +2,25 @@
 
 import { useState } from "react";
 import { generateResultsPdf } from "@/lib/resultsPdf";
-import type { AiDetected, KnownMatch, ProjectSummary } from "@/lib/types";
+import type {
+  AiDetected,
+  KnownMatch,
+  ProductMatch,
+  ProjectSummary,
+} from "@/lib/types";
 
 type Props = {
   summary: ProjectSummary | null;
   knownMatches: KnownMatch[];
   aiDetected: AiDetected[];
+  products: ProductMatch[];
 };
 
 export default function DownloadResultsButton({
   summary,
   knownMatches,
   aiDetected,
+  products,
 }: Props) {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState(false);
@@ -23,7 +30,7 @@ export default function DownloadResultsButton({
     setGenerating(true);
     setError(false);
     try {
-      await generateResultsPdf({ summary, knownMatches, aiDetected });
+      await generateResultsPdf({ summary, knownMatches, aiDetected, products });
     } catch {
       setError(true);
     } finally {
