@@ -33,6 +33,12 @@ const OPTIONS: { value: SpecFormat; label: string; description: string }[] = [
     description:
       "Send everything to Claude (use for short specs or an unknown format).",
   },
+  {
+    value: "custom",
+    label: "Custom sections",
+    description:
+      "Search specific section/division numbers you enter (e.g. 46, 43, 11).",
+  },
 ];
 
 export default function SpecFormatSelector({ value, onChange, disabled }: Props) {

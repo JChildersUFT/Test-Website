@@ -20,9 +20,22 @@ type Props = {
   products: ProductMatch[];
   errorMsg: string | null;
   activeFormat: SpecFormat;
+  activeSections: string;
   reanalyzing: boolean;
   pendingFormat: SpecFormat;
+  pendingSections: string;
 };
+
+// Human label for a format, folding in the section numbers for custom search.
+function formatDisplay(format: SpecFormat, sections: string): string {
+  if (format === "custom") {
+    const trimmed = sections.trim();
+    return trimmed
+      ? `Custom section search: ${trimmed}`
+      : "Custom section search";
+  }
+  return SPEC_FORMAT_LABELS[format];
+}
 
 export default function ResultsSection({
   status,
@@ -32,8 +45,10 @@ export default function ResultsSection({
   products,
   errorMsg,
   activeFormat,
+  activeSections,
   reanalyzing,
   pendingFormat,
+  pendingSections,
 }: Props) {
   return (
     <section className="w-full bg-surface">
@@ -63,7 +78,7 @@ export default function ResultsSection({
                 className="rounded-lg bg-light-teal px-4 py-3 text-center text-sm font-medium text-teal"
                 role="status"
               >
-                Re-analyzing with {SPEC_FORMAT_LABELS[pendingFormat]}…
+                Re-analyzing with {formatDisplay(pendingFormat, pendingSections)}…
               </p>
             )}
 
@@ -91,7 +106,7 @@ export default function ResultsSection({
             {summary && <SummaryCard summary={summary} />}
 
             <p className="-mt-6 text-xs text-secondary">
-              Analyzed using: {SPEC_FORMAT_LABELS[activeFormat]}
+              Analyzed using: {formatDisplay(activeFormat, activeSections)}
             </p>
 
             <div>

@@ -39,6 +39,10 @@ export default function SpecFinderApp() {
   // Full extracted pages, cached so a format change re-runs Pass 2 only.
   const [extractedPages, setExtractedPages] = useState<PageText[] | null>(null);
   const [reanalyzing, setReanalyzing] = useState(false);
+  // Raw section-number input for the custom search, and the value that
+  // produced the current results.
+  const [sections, setSections] = useState("");
+  const [activeSections, setActiveSections] = useState("");
 
   const handleFile = async (file: File) => {
     setStatus("loading");
@@ -53,6 +57,7 @@ export default function SpecFinderApp() {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("format", format);
+        formData.append("sections", sections);
         res = await fetch("/api/extract", {
           method: "POST",
           body: formData,
@@ -68,7 +73,7 @@ export default function SpecFinderApp() {
         res = await fetch("/api/extract", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ blobUrl: blob.url, format }),
+          body: JSON.stringify({ blobUrl: blob.url, format, sections }),
         });
       }
 
@@ -78,12 +83,14 @@ export default function SpecFinderApp() {
         throw new Error(data.error || "Something went wrong. Please try again.");
       }
 
+      const usedFormat = (data.format ?? format) as SpecFormat;
       setSummary(data.summary ?? null);
       setKnownMatches(data.knownMatches ?? []);
       setAiDetected(data.aiDetected ?? []);
       setProducts(data.products ?? []);
       setExtractedPages(Array.isArray(data.pages) ? data.pages : null);
-      setActiveFormat(data.format ?? format);
+      setActiveFormat(usedFormat);
+      setActiveSections(usedFormat === "custom" ? sections : "");
       setStatus("done");
     } catch (err) {
       setErrorMsg(
@@ -93,14 +100,18 @@ export default function SpecFinderApp() {
     }
   };
 
-  const reanalyze = async (nextFormat: SpecFormat, pages: PageText[]) => {
+  const reanalyze = async (
+    nextFormat: SpecFormat,
+    pages: PageText[],
+    sectionsArg = ""
+  ) => {
     setReanalyzing(true);
     setErrorMsg(null);
     try {
       const res = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pages, format: nextFormat }),
+        body: JSON.stringify({ pages, format: nextFormat, sections: sectionsArg }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -109,7 +120,8 @@ export default function SpecFinderApp() {
       setKnownMatches(data.knownMatches ?? []);
       setAiDetected(data.aiDetected ?? []);
       if (Array.isArray(data.products)) setProducts(data.products);
-      setActiveFormat(data.format ?? nextFormat);
+      setActiveFormat(nextFormat);
+      setActiveSections(nextFormat === "custom" ? sectionsArg : "");
     } catch (err) {
       setErrorMsg(
         err instanceof Error ? err.message : "Re-analysis failed. Please try again."
@@ -122,9 +134,22 @@ export default function SpecFinderApp() {
   const handleFormatChange = (nextFormat: SpecFormat) => {
     if (nextFormat === format) return;
     setFormat(nextFormat);
-    // Re-run Pass 2 in place if we already have results + cached pages.
+    // Re-run Pass 2 in place if we already have results + cached pages. Custom
+    // waits for the user to enter section numbers and press Search.
     if (status === "done" && extractedPages) {
-      void reanalyze(nextFormat, extractedPages);
+      if (nextFormat === "custom") {
+        if (sections.trim()) void reanalyze(nextFormat, extractedPages, sections);
+      } else {
+        void reanalyze(nextFormat, extractedPages);
+      }
+    }
+  };
+
+  const handleCustomSearch = () => {
+    if (!sections.trim() || status === "loading" || reanalyzing) return;
+    if (format !== "custom") setFormat("custom");
+    if (status === "done" && extractedPages) {
+      void reanalyze("custom", extractedPages, sections);
     }
   };
 
@@ -143,12 +168,35 @@ export default function SpecFinderApp() {
             partner list.
           </p>
 
-          <div className="mt-10 flex justify-center">
+          <div className="mt-10 flex flex-col items-center gap-4">
             <SpecFormatSelector
               value={format}
               onChange={handleFormatChange}
               disabled={selectorDisabled}
             />
+            {format === "custom" && (
+              <div className="flex w-full max-w-md items-center gap-2">
+                <input
+                  type="text"
+                  value={sections}
+                  onChange={(e) => setSections(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleCustomSearch();
+                  }}
+                  placeholder="Section numbers, e.g. 46, 43, 11"
+                  aria-label="Section numbers to search"
+                  className="w-full rounded-lg border border-light-blue bg-white px-4 py-2.5 text-sm text-navy outline-none placeholder:text-secondary focus:border-primary focus:ring-2 focus:ring-primary/20"
+                />
+                <button
+                  type="button"
+                  onClick={handleCustomSearch}
+                  disabled={selectorDisabled || !sections.trim()}
+                  className="shrink-0 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Search
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="mt-8">
@@ -167,8 +215,10 @@ export default function SpecFinderApp() {
         products={products}
         errorMsg={errorMsg}
         activeFormat={activeFormat}
+        activeSections={activeSections}
         reanalyzing={reanalyzing}
         pendingFormat={format}
+        pendingSections={sections}
       />
 
       <WaveDivider className="bg-surface" />

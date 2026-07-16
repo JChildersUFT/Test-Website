@@ -309,9 +309,48 @@ function isLegacyModePage(text: string) {
 // Minimum distinct keyword hits for the keyword-scan mode to include a page.
 const KEYWORD_MODE_MIN = 2;
 
+// Custom section search — the user types one or more division/section numbers
+// (e.g. "46, 43, 11"). Parse out the 1–2 digit tokens (padded to two digits,
+// matching MasterFormat's leading-zero divisions) and build a matcher that
+// covers both the modern 6-digit ("46 0500" / "460500") and legacy 5-digit
+// ("11226", "11226.03", "11226 - 2") forms of each.
+function parseSections(value: unknown): string[] {
+  const raw =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value)
+      ? value.map(String).join(" ")
+      : "";
+  const tokens = raw
+    .split(/[^\d]+/)
+    .filter((t) => t.length >= 1 && t.length <= 2)
+    .map((t) => t.padStart(2, "0"));
+  return [...new Set(tokens)];
+}
+
+function buildCustomSectionTest(sections: string[]): (text: string) => boolean {
+  const patterns: RegExp[] = [];
+  for (const nn of sections) {
+    const d = escapeRegExp(nn);
+    patterns.push(
+      new RegExp(`\\bSECTION\\s+${d}\\s*\\d{3,4}`, "i"), // SECTION 46 0500 / SECTION 11226
+      new RegExp(`\\b${d}\\s?\\d{4}\\b`), // 46 0500 / 460500 (modern 6-digit)
+      new RegExp(`\\b${d}\\d{3}\\.\\d{2}\\b`), // 11226.03 (legacy subsection)
+      new RegExp(`\\b${d}\\d{3}\\s*-\\s*\\d+\\b`), // 11226 - 2 (legacy footer)
+      new RegExp(`${d}\\s*\\d{3,4}\\/\\d+\\s+of\\s+\\d+`, "i") // 46 0500/1 of 6 footer
+    );
+  }
+  return (text: string) => patterns.some((re) => re.test(text));
+}
+
 // Selects the pages fed to Pass 2 based on the user-chosen spec format. The
-// appendix cutoff has already been applied by the caller.
-function selectPagesForFormat(allPages: PageText[], format: SpecFormat): PageText[] {
+// appendix cutoff has already been applied by the caller. `sections` is only
+// used by the "custom" format.
+function selectPagesForFormat(
+  allPages: PageText[],
+  format: SpecFormat,
+  sections: string[]
+): PageText[] {
   switch (format) {
     case "division46": {
       // Any page carrying a Division 46 section number; matched pages carry
@@ -327,6 +366,12 @@ function selectPagesForFormat(allPages: PageText[], format: SpecFormat): PageTex
       return allPages.filter(
         (p) => keywordMatchCount(getPageText(p)) >= KEYWORD_MODE_MIN
       );
+    case "custom": {
+      if (sections.length === 0) return [];
+      const test = buildCustomSectionTest(sections);
+      const triggers = allPages.map((p) => test(getPageText(p)));
+      return carryForward(allPages, triggers);
+    }
     case "full":
     default:
       return allPages;
@@ -380,7 +425,10 @@ function findAppendixCutoff(allPages: PageText[]): number {
 // Coerce an untrusted request value to a valid SpecFormat, defaulting to
 // Division 46 (the UI default).
 function parseFormat(value: unknown): SpecFormat {
-  return value === "legacy" || value === "keyword" || value === "full"
+  return value === "legacy" ||
+    value === "keyword" ||
+    value === "full" ||
+    value === "custom"
     ? value
     : "division46";
 }
@@ -428,20 +476,27 @@ export async function POST(req: NextRequest) {
   let bytes: Uint8Array;
   let blobUrl: string | null = null;
   let format: SpecFormat = "division46";
+  let sections: string[] = [];
 
   if (contentType.includes("application/json")) {
-    let body: { blobUrl?: unknown; pages?: unknown; format?: unknown };
+    let body: {
+      blobUrl?: unknown;
+      pages?: unknown;
+      format?: unknown;
+      sections?: unknown;
+    };
     try {
       body = await req.json();
     } catch {
       return NextResponse.json({ error: "Invalid upload." }, { status: 400 });
     }
     format = parseFormat(body.format);
+    sections = parseSections(body.sections);
 
     // Re-analysis: the client sends back the pages it already extracted so we
     // re-run only Pass 2 with a new format, without re-parsing the PDF.
     if (Array.isArray(body.pages)) {
-      return await reanalyze(body.pages, format);
+      return await reanalyze(body.pages, format, sections);
     }
 
     if (typeof body.blobUrl !== "string" || !body.blobUrl) {
@@ -482,6 +537,7 @@ export async function POST(req: NextRequest) {
     }
 
     format = parseFormat(formData.get("format"));
+    sections = parseSections(formData.get("sections"));
 
     const file = formData.get("file");
     if (!(file instanceof File)) {
@@ -501,7 +557,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    return await extractFromBytes(bytes, format);
+    return await extractFromBytes(bytes, format, sections);
   } finally {
     if (blobUrl) {
       try {
@@ -515,7 +571,8 @@ export async function POST(req: NextRequest) {
 
 async function extractFromBytes(
   bytes: Uint8Array,
-  format: SpecFormat
+  format: SpecFormat,
+  sections: string[]
 ): Promise<NextResponse> {
   const pages: PageText[] = [];
 
@@ -604,7 +661,7 @@ async function extractFromBytes(
 
   const [summary, pass2] = await Promise.all([
     runSummaryPass(anthropic, frontMatterPages),
-    runPass2(anthropic, pages, format),
+    runPass2(anthropic, pages, format, sections),
   ]);
 
   // Return the full extracted pages so the client can re-run Pass 2 with a
@@ -616,7 +673,8 @@ async function extractFromBytes(
 // change. Skips PDF parsing and the summary pass entirely.
 async function reanalyze(
   rawPages: unknown[],
-  format: SpecFormat
+  format: SpecFormat,
+  sections: string[]
 ): Promise<NextResponse> {
   const pages: PageText[] = rawPages
     .map((p) => {
@@ -645,7 +703,7 @@ async function reanalyze(
   const anthropic = new Anthropic({ apiKey });
 
   const products = findProductMentions(pages);
-  const pass2 = await runPass2(anthropic, pages, format);
+  const pass2 = await runPass2(anthropic, pages, format, sections);
   return NextResponse.json({ ...pass2, products, format });
 }
 
@@ -654,7 +712,8 @@ async function reanalyze(
 async function runPass2(
   anthropic: Anthropic,
   allPages: PageText[],
-  format: SpecFormat
+  format: SpecFormat,
+  sections: string[]
 ): Promise<{ knownMatches: KnownMatch[]; aiDetected: AiDetected[] }> {
   // Hard appendix/transcript cutoff — runs for every format.
   let workingPages = allPages;
@@ -671,10 +730,11 @@ async function runPass2(
     workingPages = allPages.slice(0, cutoffIdx);
   }
 
-  const relevantPages = selectPagesForFormat(workingPages, format);
+  const relevantPages = selectPagesForFormat(workingPages, format, sections);
   console.log(
     "Format:",
     format,
+    format === "custom" ? `(sections: ${sections.join(", ") || "none"})` : "",
     "| Pages selected:",
     relevantPages.length,
     "of",

@@ -38,12 +38,19 @@ export interface ProductMatch {
 }
 
 // Which section-filtering strategy Pass 2 uses. Chosen explicitly in the UI —
-// there is no auto-detection.
-export type SpecFormat = "division46" | "legacy" | "keyword" | "full";
+// there is no auto-detection. "custom" also carries user-entered section
+// numbers (see the sections field on requests).
+export type SpecFormat =
+  | "division46"
+  | "legacy"
+  | "keyword"
+  | "full"
+  | "custom";
 
 export const SPEC_FORMAT_LABELS: Record<SpecFormat, string> = {
   division46: "Division 46 — New MasterFormat",
   legacy: "Division 11/13/15 — Legacy MasterFormat",
   keyword: "Keyword scan",
   full: "Full document",
+  custom: "Custom section search",
 };
